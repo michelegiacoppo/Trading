@@ -1,0 +1,13 @@
+# --- Runtime ---------------------------------------------------------------
+# MetaTrader5 ships Windows-only wheels: the framework imports it lazily so the
+# backtester, the tests and CI run on Linux/macOS as well.
+MetaTrader5>=5.0.45; platform_system == "Windows"
+numpy>=1.26
+pandas>=2.1
+PyYAML>=6.0
+python-dotenv>=1.0
+rich>=13.7
+
+# --- Dev / CI --------------------------------------------------------------
+pytest>=8.0
+ruff>=0.5

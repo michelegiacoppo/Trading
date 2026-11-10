@@ -1,0 +1,19 @@
+[project]
+name = "xau-quant-scalper"
+version = "0.1.0"
+description = "Fast-intraday / scalping framework for XAUUSD and CFDs on MetaTrader 5"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+markers = ["live: requires a running MetaTrader 5 terminal (set RUN_MT5_DIAG=1)"]
