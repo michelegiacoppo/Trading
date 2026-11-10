@@ -19,6 +19,7 @@ POI, IN ORDINE (doppio clic):
  2_DIAGNOSTICA.bat   verifica collegamento MT5, simbolo, tick value, storico (nessun ordine)
  3_BACKTEST.bat      scarica lo storico da MT5 e stampa il report del backtest
  3b_CONFRONTA_PROFILI.bat  confronta profilo base e profilo attivo (piu' trade) sugli stessi dati
+ 3c_DIAGNOSI_COSTI.bat     stessi profili a costi ZERO: capisce se i segnali hanno valore prima dei costi
  4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
  5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
 

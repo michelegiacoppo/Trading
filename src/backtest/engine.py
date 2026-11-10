@@ -202,6 +202,9 @@ class BacktestEngine:
                 0, bt.spread_jitter_points, len(m1)
             )
         m1["spread"] = m1["spread"].ffill().fillna(bt.default_spread_points)
+        if bt.gross:  # diagnostic only: is there any raw edge before costs?
+            m1["spread"] = 0.0
+            spread_source = "ZERO - GROSS TEST (costs removed, NOT tradable)"
 
         feats = self.strategy.compute_features(self.build_frames(m1))
         n = len(feats)
@@ -486,6 +489,10 @@ def compute_stats(res: BacktestResult) -> dict[str, float]:
         "profit_factor": float(wins.sum() / gross_loss) if gross_loss > 0 else float("inf"),
         "expectancy_usd": float(pnl.mean()),
         "expectancy_r": float(r.mean()),
+        "expectancy_r_ci95": float(1.96 * r.std(ddof=1) / np.sqrt(len(r))) if len(r) > 1 else 0.0,
+        "expectancy_r_tstat": float(r.mean() / (r.std(ddof=1) / np.sqrt(len(r))))
+        if len(r) > 1 and r.std(ddof=1) > 0
+        else 0.0,
         "avg_win_usd": float(wins.mean()) if len(wins) else 0.0,
         "avg_loss_usd": float(losses.mean()) if len(losses) else 0.0,
         "max_drawdown_pct": float(dd_pct),

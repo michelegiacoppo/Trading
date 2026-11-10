@@ -190,6 +190,7 @@ class BacktestConfig:
     spread_jitter_points: float = 8
     simulated_slippage_points: float = 5
     seed: int = 42
+    gross: bool = False  # diagnostic: zero spread/slippage/commission (NOT tradable)
     hourly_min_trades: int = 5
     optimize_train_pct: float = 0.70
     equity_curve_file: str = "logs/equity_curve.csv"

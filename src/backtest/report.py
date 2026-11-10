@@ -28,9 +28,11 @@ def _col(v: float, good: float = 0.0) -> str:
 
 
 def losing_slots(hourly: pd.DataFrame, min_trades: int) -> list[str]:
+    """Slots that are clearly bad: enough trades AND avg R <= -0.3 AND PF < 0.7."""
     if hourly.empty:
         return []
-    bad = hourly[(hourly["trades"] >= min_trades) & (hourly["net_usd"] < 0)]
+    bad = hourly[(hourly["trades"] >= min_trades) & (hourly["avg_r"] <= -0.3)
+                 & (hourly["profit_factor"] < 0.7)]  # fmt: skip
     return list(bad.index)
 
 
@@ -110,6 +112,9 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
     tz = settings.sessions.timezone
 
     synthetic = str(meta.get("spread_source", "")).startswith("SYNTHETIC")
+    if str(meta.get("spread_source", "")).startswith("ZERO"):
+        con.print("[bold white on red] GROSS TEST: spread, slippage and commissions removed. "
+                  "Diagnostic only - NOT a tradable result. [/]")  # fmt: skip
     head = Table.grid(padding=(0, 2))
     head.add_column(style="dim")
     head.add_column()
@@ -145,6 +150,11 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
         ("Profit factor", _fmt(st["profit_factor"]), _col(st["profit_factor"], 1)),
         ("Expectancy / trade", f"{_fmt(st['expectancy_usd'])} $  |  {st['expectancy_r']:+.3f} R",
          _col(st["expectancy_usd"])),
+        ("Expectancy 95% CI (R)",
+         f"{st['expectancy_r'] - st.get('expectancy_r_ci95', 0):+.3f} … "
+         f"{st['expectancy_r'] + st.get('expectancy_r_ci95', 0):+.3f}  (t = {st.get('expectancy_r_tstat', 0):+.1f})",
+         "green" if st["expectancy_r"] - st.get("expectancy_r_ci95", 0) > 0
+         else "red" if st["expectancy_r"] + st.get("expectancy_r_ci95", 0) < 0 else "yellow"),
         ("Avg win / avg loss", f"{_fmt(st['avg_win_usd'])} / {_fmt(st['avg_loss_usd'])}", "white"),
         ("Max drawdown", f"{st['max_drawdown_pct']:.2f}%  ({_fmt(st['max_drawdown_usd'])} $)", "red"),
         ("Sharpe (daily, ann.)", _fmt(st["sharpe"]), _col(st["sharpe"], 1)),
@@ -193,10 +203,13 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
                    _fmt(r["profit_factor"]), f"[{color}]{'█' * bar_len}[/]")  # fmt: skip
     con.print(ht)
     bad = losing_slots(hourly, settings.backtest.hourly_min_trades)
-    if bad:
-        con.print(f"[yellow]Losing slots (≥{settings.backtest.hourly_min_trades} trades, net < 0):[/] "
-                  f"{', '.join(bad)}\n  → to exclude them add to settings.yaml: "
-                  f"[bold]sessions.blocked_slots: {bad}[/]")  # fmt: skip
+    if st.get("expectancy_r", 0) + st.get("expectancy_r_ci95", 0) < 0:
+        con.print("[bold red]The strategy is losing with statistical confidence: filtering time slots "
+                  "will not fix it (it only fits the past). Rework the signal first.[/]")  # fmt: skip
+    elif bad and len(bad) <= max(2, len(hourly) // 4):
+        con.print(f"[yellow]Clearly losing slots (≥{settings.backtest.hourly_min_trades} trades, avg ≤ -0.3R, "
+                  f"PF < 0.7):[/] {', '.join(bad)}\n  → candidates for sessions.blocked_slots - "
+                  "confirm on out-of-sample data before excluding them.")  # fmt: skip
     if synthetic:
         con.print("[bold red]⚠ Spread was synthetic: results are NOT reliable for XAUUSD.[/]")
     return hourly

@@ -179,6 +179,13 @@ def load_backtest_data(settings: Settings, args: argparse.Namespace, symbols: li
     return data, clock
 
 
+def apply_gross(settings: Settings) -> None:
+    """Remove all trading costs (diagnostic: separates 'no edge' from 'edge eaten by costs')."""
+    settings.backtest.gross = True
+    settings.backtest.simulated_slippage_points = 0.0
+    settings.risk.commission_per_lot = 0.0
+
+
 def run_portfolio(settings: Settings, data: dict[str, tuple], clock: ServerClock):  # noqa: ANN201
     """Backtest every symbol and merge them: returns (portfolio result, per-symbol results)."""
     from src.backtest.engine import BacktestEngine, combine_results
@@ -263,6 +270,8 @@ def run_compare(
     for name in names:
         s = load_settings(args.config, name)
         s.general.symbol_suffix = settings.general.symbol_suffix
+        if settings.backtest.gross:
+            apply_gross(s)
         s.resolve_symbols(list(data))
         res, per_symbol = run_portfolio(s, data, clock)
         console.rule(f"[bold]Profile: {name}")
@@ -350,6 +359,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--compare", action="store_true", help="backtest base + all profiles side by side"
     )
+    p.add_argument(
+        "--gross", action="store_true", help="diagnostic backtest with zero costs (not tradable)"
+    )
     p.add_argument("--optimize", action="store_true", help="run the IS/OOS auto-optimizer")
     p.add_argument(
         "--csv", default=None, help="M1 CSV/Parquet (MT5 export or time,open,high,low,close)"
@@ -370,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = load_settings(args.config, args.profile)
     args.resolved_symbols = settings.resolve_symbols(args.symbols)
+    if getattr(args, "gross", False):
+        apply_gross(settings)
     ui_mode = args.mode in ("live", "dryrun") and not args.no_ui
     setup_logging(settings, args.mode, to_console=not ui_mode)
 
