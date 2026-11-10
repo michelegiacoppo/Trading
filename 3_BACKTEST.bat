@@ -11,6 +11,13 @@ set /p "DAYS=Quanti giorni di storico (Invio = 365): "
 echo.
 echo [1/2] Scarico/aggiorno lo storico da MT5 ...
 ".venv\Scripts\python.exe" main.py --mode download --days %DAYS% --symbols %SYM%
+if errorlevel 1 (
+  echo.
+  echo Collegamento a MT5 non riuscito: leggi il suggerimento HINT qui sopra.
+  echo Controlla che MT5 sia aperto e LOGGATO in un conto ^(anche demo^).
+  pause
+  exit /b 1
+)
 echo.
 echo [2/2] Backtest ...
 ".venv\Scripts\python.exe" main.py --mode backtest --days %DAYS% --symbols %SYM%

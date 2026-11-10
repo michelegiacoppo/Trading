@@ -67,7 +67,7 @@ class GeneralConfig:
 
 @dataclass
 class MT5Config:
-    timeout_ms: int = 10000
+    timeout_ms: int = 60000
     max_reconnect_attempts: int = 5
     reconnect_backoff_s: float = 2.0
 

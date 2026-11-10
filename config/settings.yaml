@@ -13,7 +13,7 @@ general:
   log_dir: logs                  # cartella file di log
 
 mt5:
-  timeout_ms: 10000              # timeout di mt5.initialize()
+  timeout_ms: 60000              # attesa max collegamento al terminale (60 s: il primo avvio è lento)
   max_reconnect_attempts: 5      # tentativi di riconnessione automatica
   reconnect_backoff_s: 2.0       # attesa iniziale tra tentativi (raddoppia: 2, 4, 8...)
 

@@ -31,6 +31,17 @@ RETCODES: dict[int, str] = {
     10039: "CLOSE_ORDER_EXIST", 10040: "LIMIT_POSITIONS", 10044: "CLOSE_ONLY", 10045: "FIFO_CLOSE",
 }  # fmt: skip
 RETCODE_DONE = {10008, 10009, 10010}
+
+# mt5.initialize() error codes -> actionable hints for the user
+INIT_HINTS: dict[int, str] = {
+    -10005: "IPC timeout: MT5 is not answering. Log in to an account (File > Login to Trade Account), "
+    "do not run MT5 as administrator unless Python is too, close extra MT5 terminals or set MT5_PATH "
+    "in config/.env, then retry.",
+    -10004: "No IPC connection: open the MetaTrader 5 terminal and log in to an account.",
+    -10003: "Terminal launch failed: check MT5_PATH in config/.env (path to terminal64.exe).",
+    -6: "Authorization failed: check MT5_LOGIN / MT5_PASSWORD / MT5_SERVER in config/.env.",
+    -2: "Invalid parameters: check MT5_LOGIN (numbers only) and MT5_SERVER in config/.env.",
+}
 RETCODE_RETRY = {10004, 10020, 10021, 10024, 10031}  # requote, price changed/off, busy, link
 
 
@@ -92,7 +103,12 @@ class MT5Connector:
                 server=self.credentials.server,
             )
         if not mt5.initialize(**kwargs):
-            log.error("mt5.initialize failed: %s", mt5.last_error())
+            err = mt5.last_error()
+            code = err[0] if isinstance(err, tuple) and err else None
+            log.error("mt5.initialize failed: %s", err)
+            hint = INIT_HINTS.get(code)
+            if hint:
+                log.error("HINT: %s", hint)
             self._connected = False
             return False
 

@@ -5,7 +5,9 @@ PRIMA DI INIZIARE
  1. Installa Python 3.12 "Windows installer (64-bit)" da https://www.python.org/downloads/windows/
     -> NON la 32-bit e NON la ARM64 (anche su PC Snapdragon usa la 64-bit x64)
     -> durante l'installazione spunta "Add python.exe to PATH".
- 2. Apri MetaTrader 5 e fai login sul conto DEMO.
+ 2. Apri MetaTrader 5 e fai LOGIN su un conto DEMO (File > Accedi al conto di trading).
+    Senza login il bot non si collega (errore 'IPC timeout').
+    Avvia MT5 normalmente, NON come amministratore.
  3. In MT5: Strumenti > Opzioni > Grafici > "Barre max nel grafico" = Illimitate
     (poi riavvia MT5: serve per avere tanto storico M1).
  4. Controlla nel "Market Watch" il nome esatto dell'oro (XAUUSD, XAUUSD.m, GOLD...).
