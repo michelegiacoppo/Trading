@@ -367,3 +367,14 @@ def test_dashboard_renders() -> None:
         "London",
     ):
         assert frag in text
+
+
+def test_broker_symbol_aliases() -> None:
+    s = load_settings()
+    s.ensure_symbols(["XAUUSD.m"])
+    assert s.enabled_symbols == ["XAUUSD.m"]
+    assert s.symbols["XAUUSD.m"].max_spread_points == s.symbols["XAUUSD"].max_spread_points
+    s.ensure_symbols(["GOLD"])
+    assert s.symbols["GOLD"].backtest_spec().name == "GOLD"
+    with pytest.raises(ValueError):
+        s.ensure_symbols(["BTCUSD"])

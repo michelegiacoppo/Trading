@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -245,6 +245,30 @@ class Settings:
     @property
     def enabled_symbols(self) -> list[str]:
         return [s for s, c in self.symbols.items() if c.enabled]
+
+    def ensure_symbols(self, names: list[str] | None) -> None:
+        """Map broker-specific names (``XAUUSD.m``, ``XAUUSDm``, ``GOLD``...) onto a configured symbol.
+
+        Unknown names inherit the parameters of the configured symbol they start with
+        (``GOLD*`` -> ``XAUUSD``) and become the enabled symbols for this run.
+        """
+        if not names:
+            return
+        aliases = {"GOLD": "XAUUSD", "XAU": "XAUUSD", "NAS100": "US100", "USTEC": "US100"}
+        for name in names:
+            if name in self.symbols:
+                continue
+            upper = name.upper()
+            base = next((k for k in self.symbols if upper.startswith(k.upper())), None)
+            base = base or next((v for a, v in aliases.items() if upper.startswith(a)), None)
+            if base is None or base not in self.symbols:
+                raise ValueError(
+                    f"Symbol '{name}' not in settings.yaml and no similar entry found: "
+                    f"add it under `symbols:`"
+                )
+            self.symbols[name] = replace(self.symbols[base], name=name)
+        for key, cfg in self.symbols.items():
+            cfg.enabled = key in names
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Settings:

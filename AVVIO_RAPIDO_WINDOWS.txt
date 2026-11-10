@@ -1,0 +1,28 @@
+XAU QUANT SCALPER - AVVIO RAPIDO (Windows)
+==========================================
+
+PRIMA DI INIZIARE
+ 1. Installa Python 3.12 da https://www.python.org/downloads/
+    -> durante l'installazione spunta "Add python.exe to PATH".
+ 2. Apri MetaTrader 5 e fai login sul conto DEMO.
+ 3. In MT5: Strumenti > Opzioni > Grafici > "Barre max nel grafico" = Illimitate
+    (poi riavvia MT5: serve per avere tanto storico M1).
+ 4. Controlla nel "Market Watch" il nome esatto dell'oro (XAUUSD, XAUUSD.m, GOLD...).
+
+POI, IN ORDINE (doppio clic):
+ 1_INSTALLA.bat      crea l'ambiente Python e installa i pacchetti (solo la prima volta)
+ 2_DIAGNOSTICA.bat   verifica collegamento MT5, simbolo, tick value, storico (nessun ordine)
+ 3_BACKTEST.bat      scarica lo storico da MT5 e stampa il report del backtest
+ 4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
+ 5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
+
+COME LEGGERE IL REPORT
+ - Spread source deve essere verde ("real")
+ - Trades: almeno 200 per un giudizio affidabile
+ - Profit Factor > 1.2 e Expectancy (R) positiva
+ - Max Drawdown accettabile
+ - Analisi oraria: indica gli slot da escludere (sessions.blocked_slots in config\settings.yaml)
+
+Le credenziali in config\.env NON servono se MT5 e' gia' aperto e loggato.
+Parametri modificabili in config\settings.yaml (commentati in italiano).
+In caso di errore: copia tutto il testo della finestra e mandalo.
