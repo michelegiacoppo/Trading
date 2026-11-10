@@ -6,11 +6,14 @@ Nothing is ever sent to the market: ``order_check`` is used for a dry validation
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from rich.console import Console
 from rich.table import Table
 
 from src.config import Credentials, Settings
 from src.core.data_feed import DataFeed
+from src.core.execution import server_dt
 from src.core.mt5_connector import MT5Connector
 from src.risk.position_sizer import PositionSizer, money_per_lot
 from src.strategies import indicators as ind
@@ -78,6 +81,15 @@ def run_diagnostics(
             )
             st.add_row("contract size", f"{info.trade_contract_size}")
             st.add_row(
+                "currency profit / account",
+                f"{getattr(info, 'currency_profit', '?')} / {acc.currency}"
+                + (
+                    ""
+                    if getattr(info, "currency_profit", acc.currency) == acc.currency
+                    else "  (tick_value already converted by MT5)"
+                ),
+            )
+            st.add_row(
                 "volume min/max/step", f"{info.volume_min} / {info.volume_max} / {info.volume_step}"
             )
             st.add_row(
@@ -103,7 +115,8 @@ def run_diagnostics(
                 m1 = feed.get_rates(sym, "M1", 200)
                 if not m1.empty:
                     atr = float(ind.atr(m1, settings.strategy.atr_period).iloc[-1])
-                    sl = tick.ask - atr * settings.strategy.sl_atr_mult
+                    c = settings.strategy
+                    sl = tick.ask - max(atr * (1 + c.sl_atr_buffer), c.sl_min_points * info.point)
                     res = sizer.size(
                         acc.equity,
                         tick.ask,
@@ -118,13 +131,10 @@ def run_diagnostics(
                         "sample sizing",
                         f"{res.lots} lots, risk {res.risk_money:.2f} ({res.risk_pct_effective:.2f}%) - {res.reason}",
                     )
-                fill = (
-                    mt5.ORDER_FILLING_FOK
-                    if info.filling_mode & 1
-                    else mt5.ORDER_FILLING_IOC
-                    if info.filling_mode & 2
-                    else mt5.ORDER_FILLING_RETURN
-                )
+                fill = conn.filling_mode(sym)
+                names = {mt5.ORDER_FILLING_FOK: "FOK", mt5.ORDER_FILLING_IOC: "IOC",
+                         mt5.ORDER_FILLING_RETURN: "RETURN"}  # fmt: skip
+                st.add_row("filling used by the bot", names.get(fill, str(fill)))
                 chk = mt5.order_check(
                     {
                         "action": mt5.TRADE_ACTION_DEAL,
@@ -146,6 +156,20 @@ def run_diagnostics(
                     else f"[red]{getattr(chk, 'retcode', None)} {getattr(chk, 'comment', mt5.last_error())}[/]",
                 )
                 all_ok &= ok
+            # historical data availability (what the warm-up / backtest will get)
+            for tf in settings.data.warmup_timeframes:
+                bars = feed.get_rates(sym, tf, settings.data.warmup_bars)
+                first = f"{bars['time'].iloc[0]}" if not bars.empty else "-"
+                color = "green" if len(bars) >= settings.data.warmup_bars * 0.95 else "yellow"
+                st.add_row(f"history {tf}", f"[{color}]{len(bars)} bars[/] since {first}")
+            if tick:
+                srv = server_dt(tick.time_msc / 1000)
+                off = (srv - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 3600
+                st.add_row("server time / UTC offset", f"{srv:%Y-%m-%d %H:%M:%S}  (UTC{off:+.1f}h)")
+                ticks = feed.get_ticks(sym, int(tick.time_msc / 1000) - 600, 2000)
+                st.add_row("real ticks (last 10 min)", f"{len(ticks)} ticks" + (
+                    f", spread avg {ticks['spread_points'].mean():.1f} / max {ticks['spread_points'].max():.0f} pt"
+                    if not ticks.empty else ""))  # fmt: skip
             con.print(st)
     finally:
         conn.shutdown()

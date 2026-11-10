@@ -32,6 +32,7 @@ class SymbolSpec:
     tick_size: float
     tick_value: float
     contract_size: float = 1.0
+    currency_profit: str = "USD"
     volume_min: float = 0.01
     volume_max: float = 100.0
     volume_step: float = 0.01
@@ -77,30 +78,40 @@ class StrategyConfig:
     timeframes: dict[str, str] = field(
         default_factory=lambda: {"entry": "M1", "confirm": "M5", "trend": "M15"}
     )
-    history_bars: int = 400
-    trend_ema: int = 50
-    trend_slope_bars: int = 3
+    history_bars: int = 1000
+    # bias M15
+    bias_ema_fast: int = 9
+    bias_ema_slow: int = 21
+    bias_mode: str = "ema_vwap"  # ema | ema_vwap | ema_structure
+    vwap_slope_bars: int = 4
+    structure_bars: int = 8
+    confirm_enabled: bool = True
     confirm_ema_fast: int = 9
     confirm_ema_slow: int = 21
+    # trigger
+    trigger_mode: str = "any"  # sweep | squeeze | any
     atr_period: int = 14
-    velocity_lookback: int = 3
-    velocity_atr_mult: float = 1.2
-    body_ratio_min: float = 0.55
-    close_location_min: float = 0.70
+    displacement_body_atr: float = 1.5
+    displacement_volume_mult: float = 1.5
     volume_ma_period: int = 20
-    volume_spike_mult: float = 1.4
-    rsi_period: int = 7
-    rsi_long_max: float = 80
-    rsi_short_min: float = 20
-    max_bar_atr_mult: float = 3.0
-    entry_mode: str = "limit"
-    limit_pullback_atr: float = 0.25
-    limit_expiry_s: int = 90
-    sl_atr_mult: float = 1.3
-    sl_min_points: float = 80
-    sl_max_points: float = 600
-    tp_r_multiple: float = 1.6
-    max_hold_minutes: int = 25
+    sweep_lookback: int = 10
+    sweep_window: int = 3
+    squeeze_period: int = 20
+    squeeze_bb_std: float = 2.0
+    squeeze_kc_atr_mult: float = 1.5
+    squeeze_window: int = 3
+    max_bar_atr_mult: float = 4.0
+    max_open_gap_atr: float = 0.5
+    # entry
+    entry_mode: str = "limit"  # limit | market
+    limit_anchor: str = "retracement"  # retracement | fvg
+    pullback_pct: float = 0.40
+    order_expiration_candles: int = 3
+    # stop / target
+    sl_atr_buffer: float = 0.30
+    sl_min_points: float = 100
+    sl_max_points: float = 800
+    runner_tp_r: float = 3.0
 
 
 @dataclass
@@ -109,11 +120,12 @@ class RiskConfig:
     commission_per_lot: float = 7.0
     max_lot: float = 5.0
     max_open_positions: int = 2
-    max_positions_per_symbol: int = 1
+    max_positions_per_symbol: int = 2
     max_margin_usage_pct: float = 30.0
-    daily_loss_limit_pct: float = 3.0
-    daily_trailing_dd_pct: float = 4.0
-    daily_profit_lock_pct: float = 0.0
+    max_daily_loss_pct: float = 2.5
+    daily_trailing_dd_pct: float = 0.0
+    daily_profit_target_pct: float = 0.0
+    flatten_on_lock: bool = True
     max_consecutive_losses: int = 4
     max_trades_per_day: int = 30
     cooldown_after_loss_s: int = 120
@@ -124,9 +136,8 @@ class GuardrailConfig:
     spread_window: int = 300
     spread_min_samples: int = 30
     gap_atr_mult: float = 1.5
-    gap_cooldown_bars: int = 3
     tick_jump_atr_mult: float = 1.0
-    tick_jump_cooldown_s: int = 30
+    gap_block_minutes: int = 10
     stale_tick_s: int = 10
     slippage_window: int = 10
     max_avg_slippage_points: float = 25
@@ -136,10 +147,14 @@ class GuardrailConfig:
 
 @dataclass
 class SessionConfig:
-    windows: list[list[str]] = field(default_factory=list)
-    rollover_blackout: list[str] = field(default_factory=lambda: ["23:50", "01:10"])
-    friday_cutoff: str = "21:00"
-    monday_start: str = "01:30"
+    timezone: str = "Europe/Rome"
+    server_timezone: str = "auto"
+    backtest_server_timezone: str = "Europe/Athens"
+    windows: dict[str, list[str]] = field(default_factory=dict)
+    rollover_blackout: list[str] = field(default_factory=lambda: ["22:45", "01:15"])
+    friday_cutoff: str = "21:30"
+    monday_start: str = "02:00"
+    blocked_slots: list[str] = field(default_factory=list)  # 30-min slots, e.g. '12:30'
     news_blackouts: list[str] = field(default_factory=list)
     news_blackout_minutes_before: int = 5
     news_blackout_minutes_after: int = 10
@@ -147,12 +162,16 @@ class SessionConfig:
 
 @dataclass
 class ExecutionConfig:
-    partial_close_r: float = 1.0
-    partial_close_fraction: float = 0.5
-    break_even_r: float = 1.0
-    break_even_buffer_points: float = 10
-    trailing_start_r: float = 1.2
+    tp1_r: float = 1.0
+    tp1_close_fraction: float = 0.65
+    break_even_extra_points: float = 5
+    trailing_mode: str = "candles"  # candles | atr
+    trailing_candles: int = 2
     trailing_atr_mult: float = 1.0
+    trailing_only_after_tp1: bool = True
+    max_trade_duration_minutes: int = 25
+    stale_require_fade: bool = True
+    stale_momentum_threshold: float = 0.3
     order_retries: int = 3
     retry_delay_ms: int = 150
 
@@ -162,16 +181,38 @@ class BacktestConfig:
     initial_equity: float = 10_000.0
     default_spread_points: float = 20
     spread_jitter_points: float = 8
-    slippage_points: float = 5
+    simulated_slippage_points: float = 5
     seed: int = 42
+    hourly_min_trades: int = 5
+    optimize_train_pct: float = 0.70
     equity_curve_file: str = "logs/equity_curve.csv"
     trades_file: str = "logs/backtest_trades.csv"
 
 
 @dataclass
+class DataConfig:
+    historical_dir: str = "data/historical"
+    warmup_bars: int = 1000
+    warmup_timeframes: list[str] = field(default_factory=lambda: ["M1", "M5", "M15", "H1"])
+    download_chunk_days: int = 15
+
+
+@dataclass
+class LevelsConfig:
+    enabled: bool = True
+    timeframe: str = "M5"
+    asian_session_utc: list[str] = field(default_factory=lambda: ["00:00", "07:00"])
+    london_session_utc: list[str] = field(default_factory=lambda: ["07:00", "11:00"])
+    vwap_band_std: list[float] = field(default_factory=lambda: [1.0, 2.0])
+    filter_mode: str = "priority"  # priority | required | off
+    non_key_risk_mult: float = 0.5
+    sweep_tolerance_atr: float = 0.10
+
+
+@dataclass
 class DashboardConfig:
     refresh_per_second: int = 4
-    max_events: int = 14
+    max_events: int = 10
 
 
 @dataclass
@@ -198,6 +239,8 @@ class Settings:
     execution: ExecutionConfig
     backtest: BacktestConfig
     dashboard: DashboardConfig
+    data: DataConfig = field(default_factory=DataConfig)
+    levels: LevelsConfig = field(default_factory=LevelsConfig)
 
     @property
     def enabled_symbols(self) -> list[str]:
@@ -220,7 +263,15 @@ class Settings:
             execution=_build(ExecutionConfig, raw.get("execution")),
             backtest=_build(BacktestConfig, raw.get("backtest")),
             dashboard=_build(DashboardConfig, raw.get("dashboard")),
+            data=_build(DataConfig, raw.get("data")),
+            levels=_build(LevelsConfig, raw.get("levels")),
         )
+
+
+def resolve_path(path: str | Path) -> Path:
+    """Relative paths in the config are relative to the project root."""
+    p = Path(path)
+    return p if p.is_absolute() else PROJECT_ROOT / p
 
 
 def load_settings(path: str | Path | None = None) -> Settings:

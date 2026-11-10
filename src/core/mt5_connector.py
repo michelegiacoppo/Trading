@@ -16,6 +16,27 @@ from src.config import Credentials, MT5Config
 
 log = logging.getLogger(__name__)
 
+# Trade server return codes (MQL5 docs: TRADE_RETCODE_*)
+RETCODES: dict[int, str] = {
+    0: "OK (order_check)", 10004: "REQUOTE", 10006: "REJECT", 10007: "CANCEL", 10008: "PLACED",
+    10009: "DONE", 10010: "DONE_PARTIAL", 10011: "ERROR", 10012: "TIMEOUT",
+    10013: "INVALID request", 10014: "INVALID_VOLUME", 10015: "INVALID_PRICE",
+    10016: "INVALID_STOPS (SL/TP too close?)", 10017: "TRADE_DISABLED", 10018: "MARKET_CLOSED",
+    10019: "NO_MONEY", 10020: "PRICE_CHANGED", 10021: "PRICE_OFF (no quotes)",
+    10022: "INVALID_EXPIRATION", 10023: "ORDER_CHANGED", 10024: "TOO_MANY_REQUESTS",
+    10025: "NO_CHANGES", 10026: "SERVER_DISABLES_AT", 10027: "CLIENT_DISABLES_AT (AutoTrading OFF)",
+    10028: "LOCKED", 10029: "FROZEN (freeze level)", 10030: "INVALID_FILL (filling mode)",
+    10031: "CONNECTION", 10032: "ONLY_REAL", 10033: "LIMIT_ORDERS", 10034: "LIMIT_VOLUME",
+    10035: "INVALID_ORDER", 10036: "POSITION_CLOSED", 10038: "INVALID_CLOSE_VOLUME",
+    10039: "CLOSE_ORDER_EXIST", 10040: "LIMIT_POSITIONS", 10044: "CLOSE_ONLY", 10045: "FIFO_CLOSE",
+}  # fmt: skip
+RETCODE_DONE = {10008, 10009, 10010}
+RETCODE_RETRY = {10004, 10020, 10021, 10024, 10031}  # requote, price changed/off, busy, link
+
+
+def describe_retcode(code: int | None) -> str:
+    return f"{code} {RETCODES.get(code or -1, 'UNKNOWN')}"
+
 
 def import_mt5() -> ModuleType | None:
     try:
@@ -156,6 +177,89 @@ class MT5Connector:
             return False
         return True
 
+    # ------------------------------------------------------------ broker
+    def filling_mode(self, symbol: str, pending: bool = False) -> int:
+        """Auto-detect the filling policy accepted by the broker for ``symbol``.
+
+        ``symbol_info.filling_mode`` is a bitmask: 1 = FOK, 2 = IOC. Pending
+        orders always use RETURN. If neither bit is set the broker only
+        supports RETURN (exchange / market execution).
+        """
+        mt5 = self.mt5
+        if pending:
+            return mt5.ORDER_FILLING_RETURN
+        info = mt5.symbol_info(symbol)
+        mask = int(getattr(info, "filling_mode", 0) or 0)
+        if mask & 1:
+            return mt5.ORDER_FILLING_FOK
+        if mask & 2:
+            return mt5.ORDER_FILLING_IOC
+        return mt5.ORDER_FILLING_RETURN
+
+    def send_request(
+        self,
+        request: dict[str, Any],
+        retries: int = 3,
+        retry_delay_ms: int = 150,
+        refresh_price: bool = False,
+    ) -> Any:
+        """``order_check`` -> ``order_send`` with retry on requote/price changes.
+
+        Every rejection is logged with its retcode and description. Returns the
+        last ``OrderSendResult`` (or ``OrderCheckResult`` if the pre-check failed).
+        """
+        mt5 = self.mt5
+        result: Any = None
+        for attempt in range(1, max(1, retries) + 1):
+            if refresh_price and request.get("action") == mt5.TRADE_ACTION_DEAL:
+                tick = mt5.symbol_info_tick(request["symbol"])
+                if tick is None:
+                    log.error("No tick for %s, request aborted", request["symbol"])
+                    return None
+                request["price"] = tick.ask if request["type"] == mt5.ORDER_TYPE_BUY else tick.bid
+            check = mt5.order_check(request)
+            if check is None:
+                log.error("order_check returned None: %s", mt5.last_error())
+                return None
+            if check.retcode not in (0, *RETCODE_DONE):
+                log.error(
+                    "order_check REJECTED %s | %s | %s",
+                    describe_retcode(check.retcode),
+                    check.comment,
+                    _short(request),
+                )
+                return check
+            result = mt5.order_send(request)
+            if result is None:
+                log.error("order_send returned None: %s", mt5.last_error())
+            elif result.retcode in RETCODE_DONE:
+                log.debug("order_send %s %s", describe_retcode(result.retcode), _short(request))
+                return result
+            elif result.retcode not in RETCODE_RETRY:
+                log.error(
+                    "order_send FAILED %s | %s | %s",
+                    describe_retcode(result.retcode),
+                    result.comment,
+                    _short(request),
+                )
+                return result
+            log.warning(
+                "order_send retry %d/%d: %s",
+                attempt,
+                retries,
+                describe_retcode(getattr(result, "retcode", None)),
+            )
+            time.sleep(retry_delay_ms / 1000)
+        return result
+
+    def bot_positions(self, magic: int, symbol: str | None = None) -> list[Any]:
+        raw = self.mt5.positions_get(symbol=symbol) if symbol else self.mt5.positions_get()
+        return [p for p in raw or () if p.magic == magic]
+
+    def bot_orders(self, magic: int, symbol: str | None = None) -> list[Any]:
+        raw = self.mt5.orders_get(symbol=symbol) if symbol else self.mt5.orders_get()
+        return [o for o in raw or () if o.magic == magic]
+
     def account_info(self) -> Any:
         return self.mt5.account_info()
 
@@ -163,3 +267,8 @@ class MT5Connector:
         """Broker server time (epoch seconds, server TZ) from the last tick."""
         tick = self.mt5.symbol_info_tick(symbol)
         return int(tick.time) if tick else None
+
+
+def _short(req: dict[str, Any]) -> str:
+    keys = ("action", "symbol", "type", "volume", "price", "sl", "tp", "position", "order")
+    return " ".join(f"{k}={req[k]}" for k in keys if k in req)

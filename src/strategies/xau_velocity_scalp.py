@@ -1,21 +1,24 @@
-"""XAU Velocity Scalp - momentum-burst "hit & run" scalper with anti-gap logic.
+"""XAU Velocity & Micro-Pullback Scalper.
 
-Pipeline (all on CLOSED bars):
+Pipeline (closed bars only, vectorised -> identical in live and backtest):
 
-1. **M15 bias**   close vs EMA(50) *and* EMA slope over N bars agree.
-2. **M5 confirm** EMA(9) vs EMA(21) aligned with the bias, price on the right side.
-3. **M1 trigger** a velocity burst: ``close - close[-N] >= k*ATR`` in bias
-   direction, closed on a strong body near the extreme, with a tick-volume spike
-   and RSI not yet exhausted.
-4. **Anti-gap**   skip trigger bars whose range is > X*ATR (news spike / gap)
-   and bars that opened with a gap vs the previous close.
-5. **Entry**      market, or a limit order on a shallow pullback into the burst
-   (better fill, filters out one-tick fakeouts, protects from slippage).
-6. **Stop**       beyond the burst's swing extreme or k*ATR (whichever is wider),
-   clamped to [min, max] points, then pushed away from round numbers
-   (``.00``/``.50``) where stop-hunting liquidity clusters sit.
-7. **Target**     fixed R-multiple; management (partial/BE/trailing/time-stop)
-   is done by :mod:`src.core.execution`.
+1. **Directional bias (M15)** - EMA 9 > EMA 21 with price above the slow EMA, confirmed by
+   the slope of the daily VWAP (``ema_vwap``) or by higher-highs/higher-lows
+   (``ema_structure``). Optional M5 EMA confirmation.
+2. **Trigger (M1)** - a *Displacement* candle (body >= 1.5x ATR(14) and tick volume
+   >= 1.5x its moving average) that either
+   * follows a **liquidity sweep**: within the last K candles price pierced the
+     high/low of the previous N candles (or an institutional key level) and closed
+     back inside, or
+   * **breaks a volatility squeeze** (Bollinger bands inside Keltner channels).
+3. **Institutional levels** - PDH/PDL, Asian & London high/low, daily VWAP +-1/2 sigma
+   (:mod:`src.core.levels`). Sweeps of these levels get absolute priority: full risk
+   (``priority``) or exclusive trading (``required``); other setups trade at reduced risk.
+4. **Smart entry anti-gap** - a LIMIT order at a 35-50% pullback of the impulse body,
+   or at the near edge of the micro Fair Value Gap, valid ``order_expiration_candles``.
+   Market mode is available (slippage capped by ``max_deviation_points``).
+5. **Structural stop** - beyond the sweep extreme + ATR buffer, at least ``sl_min_points``,
+   pushed away from round numbers (stop-hunt magnets). Shorts add the spread (stopped on ASK).
 """
 
 from __future__ import annotations
@@ -23,8 +26,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.config import StrategyConfig, SymbolConfig, SymbolSpec
-from src.risk.position_sizer import atr_stop_distance
+from src.config import LevelsConfig, StrategyConfig, SymbolConfig, SymbolSpec
+from src.core.clock import ServerClock
+from src.core.data_feed import TF_MINUTES
+from src.core.levels import LEVEL_LABELS, RESISTANCE_LEVELS, SUPPORT_LEVELS, compute_levels
 from src.strategies import indicators as ind
 from src.strategies.base_strategy import BaseStrategy, Signal
 
@@ -39,87 +44,151 @@ def avoid_round_levels(sl: float, side: int, step: float, buffer: float) -> floa
     return sl
 
 
+def _daily_vwap(df: pd.DataFrame, day: pd.Series) -> pd.Series:
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["tick_volume"].astype(float).clip(lower=1.0)
+    return (tp * vol).groupby(day).cumsum() / vol.groupby(day).cumsum()
+
+
+def _first_level(flags: dict[str, pd.Series], index: pd.Index) -> pd.Series:
+    """Name of the first (highest-priority) level whose flag is True, else ''."""
+    names = list(flags)
+    if not names:
+        return pd.Series("", index=index)
+    conds = [flags[n].fillna(False).to_numpy(dtype=bool) for n in names]
+    return pd.Series(np.select(conds, [LEVEL_LABELS[n] for n in names], default=""), index=index)
+
+
 class XauVelocityScalp(BaseStrategy):
     name = "xau_velocity_scalp"
 
-    def __init__(self, cfg: StrategyConfig) -> None:
-        super().__init__(cfg)
+    @property
+    def required_timeframes(self) -> list[str]:
+        tfs = list(self.timeframes)
+        if self.levels_cfg.enabled and self.levels_cfg.timeframe not in tfs:
+            tfs.append(self.levels_cfg.timeframe)
+        return tfs
 
     # ------------------------------------------------------------ features
     def compute_features(self, frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
         c = self.cfg
         tf_e, tf_c, tf_t = self.timeframes
-        m1 = frames[tf_e].copy()
-        m5 = frames[tf_c].copy()
-        m15 = frames[tf_t].copy()
+        m1, m5, m15 = frames[tf_e].copy(), frames[tf_c].copy(), frames[tf_t].copy()
 
-        # --- M15 directional bias
-        m15["ema_t"] = ind.ema(m15["close"], c.trend_ema)
-        slope = m15["ema_t"] - m15["ema_t"].shift(c.trend_slope_bars)
-        m15["bias"] = np.select(
-            [
-                (m15["close"] > m15["ema_t"]) & (slope > 0),
-                (m15["close"] < m15["ema_t"]) & (slope < 0),
-            ],
-            [1, -1],
-            0,
-        )
+        # --- 1. M15 bias: EMA 9/21 + VWAP slope or market structure
+        m15["ema_f"] = ind.ema(m15["close"], c.bias_ema_fast)
+        m15["ema_s"] = ind.ema(m15["close"], c.bias_ema_slow)
+        bull = (m15["ema_f"] > m15["ema_s"]) & (m15["close"] > m15["ema_s"])
+        bear = (m15["ema_f"] < m15["ema_s"]) & (m15["close"] < m15["ema_s"])
+        if c.bias_mode == "ema_vwap":
+            day = self.clock.series_to_utc(m15["time"]).dt.floor("D")
+            slope = _daily_vwap(m15, day).groupby(day).diff(c.vwap_slope_bars)
+            bull &= slope > 0
+            bear &= slope < 0
+        elif c.bias_mode == "ema_structure":
+            n = c.structure_bars
+            hi_now, hi_prev = m15["high"].rolling(n).max(), m15["high"].shift(n).rolling(n).max()
+            lo_now, lo_prev = m15["low"].rolling(n).min(), m15["low"].shift(n).rolling(n).min()
+            bull &= (hi_now > hi_prev) & (lo_now > lo_prev)
+            bear &= (hi_now < hi_prev) & (lo_now < lo_prev)
+        m15["bias"] = np.select([bull, bear], [1, -1], 0)
 
-        # --- M5 confirmation
+        # --- optional M5 confirmation
         m5["ema_f"] = ind.ema(m5["close"], c.confirm_ema_fast)
         m5["ema_s"] = ind.ema(m5["close"], c.confirm_ema_slow)
         m5["confirm"] = np.select(
-            [
-                (m5["ema_f"] > m5["ema_s"]) & (m5["close"] > m5["ema_f"]),
-                (m5["ema_f"] < m5["ema_s"]) & (m5["close"] < m5["ema_f"]),
-            ],
-            [1, -1],
-            0,
+            [m5["ema_f"] > m5["ema_s"], m5["ema_f"] < m5["ema_s"]], [1, -1], 0
         )
 
-        # --- M1 trigger features
-        m1["atr"] = ind.atr(m1, c.atr_period)
-        rng = (m1["high"] - m1["low"]).replace(0.0, np.nan)
-        m1["velocity"] = m1["close"] - m1["close"].shift(c.velocity_lookback)
-        m1["body_ratio"] = (m1["close"] - m1["open"]).abs() / rng
-        m1["close_loc"] = (m1["close"] - m1["low"]) / rng  # 1 = closed at high
+        # --- 2. M1 displacement / sweep / squeeze
+        atr = ind.atr(m1, c.atr_period)
+        m1["atr"] = atr
+        body = m1["close"] - m1["open"]
+        m1["body_atr"] = body / atr
         m1["vol_ma"] = m1["tick_volume"].rolling(c.volume_ma_period).mean().shift(1)
-        m1["rsi"] = ind.rsi(m1["close"], c.rsi_period)
-        m1["swing_low"] = m1["low"].rolling(c.velocity_lookback + 1).min()
-        m1["swing_high"] = m1["high"].rolling(c.velocity_lookback + 1).max()
-        m1["gap"] = (m1["open"] - m1["close"].shift(1)).abs()
+        m1["vol_ratio"] = m1["tick_volume"] / m1["vol_ma"]
+        vol_ok = m1["vol_ratio"] >= c.displacement_volume_mult
+        m1["disp_bull"] = (body >= c.displacement_body_atr * atr) & vol_ok
+        m1["disp_bear"] = (-body >= c.displacement_body_atr * atr) & vol_ok
+
+        n, k = c.sweep_lookback, c.sweep_window
+        prior_low = m1["low"].shift(1).rolling(n).min()
+        prior_high = m1["high"].shift(1).rolling(n).max()
+        sweep_low_bar = (m1["low"] < prior_low) & (m1["close"] > prior_low)
+        sweep_high_bar = (m1["high"] > prior_high) & (m1["close"] < prior_high)
+        m1["sweep_bull"] = sweep_low_bar.astype(float).rolling(k, min_periods=1).max() > 0
+        m1["sweep_bear"] = sweep_high_bar.astype(float).rolling(k, min_periods=1).max() > 0
+
+        p = c.squeeze_period
+        mid = m1["close"].rolling(p).mean()
+        sd = m1["close"].rolling(p).std(ddof=0)
+        bb_up, bb_dn = mid + c.squeeze_bb_std * sd, mid - c.squeeze_bb_std * sd
+        kc_mid = ind.ema(m1["close"], p)
+        kc_up, kc_dn = kc_mid + c.squeeze_kc_atr_mult * atr, kc_mid - c.squeeze_kc_atr_mult * atr
+        sq_on = ((bb_up < kc_up) & (bb_dn > kc_dn)).astype(float)
+        sq_recent = sq_on.shift(1).rolling(c.squeeze_window, min_periods=1).max() > 0
+        m1["squeeze_bull"] = sq_recent & (m1["close"] > bb_up)
+        m1["squeeze_bear"] = sq_recent & (m1["close"] < bb_dn)
+
+        m1["struct_low"] = m1["low"].rolling(k, min_periods=1).min()
+        m1["struct_high"] = m1["high"].rolling(k, min_periods=1).max()
+        m1["fvg_bull_top"] = m1["low"].where(m1["low"] > m1["high"].shift(2))
+        m1["fvg_bear_bottom"] = m1["high"].where(m1["high"] < m1["low"].shift(2))
+        m1["velocity"] = m1["close"] - m1["close"].shift(3)
+        m1["momentum"] = m1["velocity"] / atr
+        m1["sane"] = (m1["high"] - m1["low"]) <= c.max_bar_atr_mult * atr
+        m1["no_gap"] = (m1["open"] - m1["close"].shift(1)).abs() <= c.max_open_gap_atr * atr
 
         df = ind.align_htf(m1, tf_e, m15, tf_t, ["bias"], "m15_")
         df = ind.align_htf(df, tf_e, m5, tf_c, ["confirm"], "m5_")
         df[["m15_bias", "m5_confirm"]] = df[["m15_bias", "m5_confirm"]].fillna(0).astype(int)
 
-        atr_ = df["atr"]
-        burst = df["velocity"].abs() >= c.velocity_atr_mult * atr_
-        strong = df["body_ratio"] >= c.body_ratio_min
-        vol_ok = df["tick_volume"] >= c.volume_spike_mult * df["vol_ma"]
-        sane_bar = (df["high"] - df["low"]) <= c.max_bar_atr_mult * atr_
-        no_gap = df["gap"] <= 0.5 * atr_
-        common = burst & strong & vol_ok & sane_bar & no_gap & atr_.notna()
+        # --- 3. institutional key levels (causal, from closed levels-TF bars)
+        lv = self.levels_cfg
+        df["key_level_bull"] = ""
+        df["key_level_bear"] = ""
+        if lv.enabled and lv.timeframe in frames:
+            levels = compute_levels(frames[lv.timeframe], lv, self.clock)
+            cols = [col for col in levels.columns if col != "time"]
+            df = ind.align_htf(df, tf_e, levels, lv.timeframe, cols, "lv_")
+            tol = lv.sweep_tolerance_atr * df["atr"]
+            bull_flags: dict[str, pd.Series] = {}
+            bear_flags: dict[str, pd.Series] = {}
+            for name in SUPPORT_LEVELS:
+                lvl = df[f"lv_{name}"]
+                hit = (df["low"] <= lvl + tol) & (df["close"] > lvl)
+                bull_flags[name] = hit.astype(float).rolling(k, min_periods=1).max() > 0
+            for name in RESISTANCE_LEVELS:
+                lvl = df[f"lv_{name}"]
+                hit = (df["high"] >= lvl - tol) & (df["close"] < lvl)
+                bear_flags[name] = hit.astype(float).rolling(k, min_periods=1).max() > 0
+            df["key_level_bull"] = _first_level(bull_flags, df.index)
+            df["key_level_bear"] = _first_level(bear_flags, df.index)
 
-        long_ = (
-            common
-            & (df["m15_bias"] == 1)
-            & (df["m5_confirm"] == 1)
-            & (df["velocity"] > 0)
-            & (df["close"] > df["open"])
-            & (df["close_loc"] >= c.close_location_min)
-            & (df["rsi"] <= c.rsi_long_max)
-        )
-        short = (
-            common
-            & (df["m15_bias"] == -1)
-            & (df["m5_confirm"] == -1)
-            & (df["velocity"] < 0)
-            & (df["close"] < df["open"])
-            & (df["close_loc"] <= 1 - c.close_location_min)
-            & (df["rsi"] >= c.rsi_short_min)
-        )
+        key_bull = df["key_level_bull"] != ""
+        key_bear = df["key_level_bear"] != ""
+        sweep_ctx_bull = df["sweep_bull"] | key_bull
+        sweep_ctx_bear = df["sweep_bear"] | key_bear
+        if c.trigger_mode == "sweep":
+            ctx_bull, ctx_bear = sweep_ctx_bull, sweep_ctx_bear
+        elif c.trigger_mode == "squeeze":
+            ctx_bull, ctx_bear = df["squeeze_bull"], df["squeeze_bear"]
+        else:
+            ctx_bull = sweep_ctx_bull | df["squeeze_bull"]
+            ctx_bear = sweep_ctx_bear | df["squeeze_bear"]
+        if lv.enabled and lv.filter_mode == "required":
+            ctx_bull = ctx_bull & key_bull
+            ctx_bear = ctx_bear & key_bear
+
+        ones = pd.Series(True, index=df.index)
+        confirm_bull = (df["m5_confirm"] == 1) if c.confirm_enabled else ones
+        confirm_bear = (df["m5_confirm"] == -1) if c.confirm_enabled else ones
+        base = df["atr"].notna() & df["sane"].astype(bool) & df["no_gap"].astype(bool)
+        long_ = base & df["disp_bull"] & ctx_bull & (df["m15_bias"] == 1) & confirm_bull
+        short = base & df["disp_bear"] & ctx_bear & (df["m15_bias"] == -1) & confirm_bear
         df["signal"] = np.where(long_, 1, np.where(short, -1, 0)).astype(int)
+        is_sweep = np.where(df["signal"] > 0, sweep_ctx_bull, sweep_ctx_bear)
+        df["trigger"] = np.where(is_sweep, "sweep", "squeeze")
         return df.reset_index(drop=True)
 
     # --------------------------------------------------------------- order
@@ -132,52 +201,80 @@ class XauVelocityScalp(BaseStrategy):
     ) -> Signal | None:
         c = self.cfg
         side = int(row["signal"])
-        atr_ = float(row["atr"])
-        if side == 0 or not np.isfinite(atr_) or atr_ <= 0:
+        atr = float(row["atr"])
+        if side == 0 or not np.isfinite(atr) or atr <= 0:
             return None
-        close = float(row["close"])  # bid
-        buffer = symbol_cfg.stop_hunt_buffer_points * spec.point
+        o, close = float(row["open"]), float(row["close"])  # BID prices
+        pt = spec.point
+        round_buffer = symbol_cfg.stop_hunt_buffer_points * pt
 
         if side > 0:
-            ref = close + spread_price  # current ask
-            entry = ref - c.limit_pullback_atr * atr_ if c.entry_mode == "limit" else ref
-            structure = entry - float(row["swing_low"]) + buffer
+            if c.entry_mode == "market":
+                entry = close + spread_price  # current ASK
+            else:
+                level = close - c.pullback_pct * (close - o)  # 35-50% of the impulse body
+                fvg = row.get("fvg_bull_top")
+                if c.limit_anchor == "fvg" and pd.notna(fvg) and float(fvg) < close:
+                    level = float(fvg)  # near edge of the bullish FVG
+                entry = level + spread_price  # BUY LIMIT triggers on ASK
+            sl = float(row["struct_low"]) - c.sl_atr_buffer * atr
+            key = row.get("key_level_bull") or None
         else:
-            ref = close  # current bid
-            entry = ref + c.limit_pullback_atr * atr_ if c.entry_mode == "limit" else ref
-            # shorts are stopped on the ASK -> add the spread on top of the bid swing
-            structure = float(row["swing_high"]) + spread_price - entry + buffer
+            if c.entry_mode == "market":
+                entry = close
+            else:
+                level = close + c.pullback_pct * (o - close)
+                fvg = row.get("fvg_bear_bottom")
+                if c.limit_anchor == "fvg" and pd.notna(fvg) and float(fvg) > close:
+                    level = float(fvg)
+                entry = level  # SELL LIMIT triggers on BID
+            sl = float(row["struct_high"]) + spread_price + c.sl_atr_buffer * atr
+            key = row.get("key_level_bear") or None
 
-        dist = atr_stop_distance(
-            atr_, c.sl_atr_mult, spec.point, c.sl_min_points, c.sl_max_points, max(structure, 0.0)
-        )
-        if dist is None:
+        dist = side * (entry - sl)
+        if dist < c.sl_min_points * pt:  # never inside tick noise
+            sl = entry - side * c.sl_min_points * pt
+        elif dist > c.sl_max_points * pt:
             return None
-        sl = entry - side * dist
-        sl = avoid_round_levels(sl, side, symbol_cfg.stop_hunt_round_step, buffer)
+        sl = avoid_round_levels(sl, side, symbol_cfg.stop_hunt_round_step, round_buffer)
         risk = abs(entry - sl)
-        tp = entry + side * c.tp_r_multiple * risk
+        tp = entry + side * c.runner_tp_r * risk if c.runner_tp_r > 0 else 0.0
 
-        digits = spec.digits
+        risk_mult = 1.0
+        if self.levels_cfg.enabled and self.levels_cfg.filter_mode == "priority" and not key:
+            risk_mult = self.levels_cfg.non_key_risk_mult
+
+        expiry = c.order_expiration_candles * TF_MINUTES[self.entry_tf] * 60
+        reason = (
+            f"{row.get('trigger', '?')} disp {abs(float(row['body_atr'])):.1f}xATR "
+            f"vol {float(row['vol_ratio']):.1f}x" + (f" @ {key}" if key else "")
+        )
+        d = spec.digits
         return Signal(
             symbol=symbol_cfg.name,
             side=side,
-            order_type=c.entry_mode,
-            entry=round(entry, digits),
-            stop_loss=round(sl, digits),
-            take_profit=round(tp, digits),
-            atr=atr_,
+            order_type="market" if c.entry_mode == "market" else "limit",
+            entry=round(entry, d),
+            stop_loss=round(sl, d),
+            take_profit=round(tp, d),
+            atr=atr,
             time=pd.Timestamp(row["time"]),
-            reason=f"velocity {row['velocity']:.2f} ({row['velocity'] / atr_:.1f}xATR) rsi {row['rsi']:.0f}",
-            expiry_s=c.limit_expiry_s if c.entry_mode == "limit" else 0,
+            reason=reason,
+            expiry_s=0 if c.entry_mode == "market" else expiry,
+            key_level=key,
+            risk_mult=risk_mult,
         )
 
 
 STRATEGIES: dict[str, type[BaseStrategy]] = {XauVelocityScalp.name: XauVelocityScalp}
 
 
-def create_strategy(cfg: StrategyConfig) -> BaseStrategy:
+def create_strategy(
+    cfg: StrategyConfig,
+    levels_cfg: LevelsConfig | None = None,
+    clock: ServerClock | None = None,
+) -> BaseStrategy:
     try:
-        return STRATEGIES[cfg.name](cfg)
+        return STRATEGIES[cfg.name](cfg, levels_cfg, clock)
     except KeyError as exc:
         raise ValueError(f"Unknown strategy '{cfg.name}'. Available: {list(STRATEGIES)}") from exc

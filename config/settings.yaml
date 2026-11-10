@@ -1,161 +1,219 @@
 # =============================================================================
-#  XAU Quant Scalper - main configuration
-#  All times are BROKER SERVER TIME unless stated otherwise (MT5 bar timestamps
-#  are in server time). Prices in points = symbol "point" (XAUUSD: 0.01).
+#  XAU Quant Scalper - configurazione principale
+#  - Prezzi in "punti" = point del simbolo (XAUUSD: 1 punto = 0.01 $).
+#  - Gli orari delle SESSIONI sono nel fuso `sessions.timezone` (default CET/CEST,
+#    Europe/Rome); il bot converte automaticamente dall'ora server del broker.
 # =============================================================================
 
 general:
-  magic_number: 20261110
-  comment_prefix: "XQS"
-  poll_interval_ms: 250          # main loop cadence (tick polling)
-  log_level: INFO
-  log_dir: logs
+  magic_number: 20261110         # ID univoco degli ordini del bot (non tocca i trade manuali)
+  comment_prefix: "XQS"          # prefisso commento ordini MT5
+  poll_interval_ms: 250          # frequenza del loop principale (polling tick)
+  log_level: INFO                # DEBUG | INFO | WARNING | ERROR
+  log_dir: logs                  # cartella file di log
 
 mt5:
-  timeout_ms: 10000
-  max_reconnect_attempts: 5
-  reconnect_backoff_s: 2.0       # exponential: 2, 4, 8, ...
+  timeout_ms: 10000              # timeout di mt5.initialize()
+  max_reconnect_attempts: 5      # tentativi di riconnessione automatica
+  reconnect_backoff_s: 2.0       # attesa iniziale tra tentativi (raddoppia: 2, 4, 8...)
 
 # -----------------------------------------------------------------------------
-# Instruments. Each symbol can override strategy/guardrail parameters.
-# `spec` is used ONLY by the backtester (live reads it from the broker).
+# Strumenti. Ogni simbolo ha i propri filtri spread / anti stop-hunt.
+# `spec` serve SOLO al backtest: in live le specifiche si leggono da symbol_info.
 # -----------------------------------------------------------------------------
 symbols:
   XAUUSD:
-    enabled: true
-    max_spread_points: 35        # hard cap
-    spread_median_mult: 1.8      # dynamic: spread <= median(window) * mult
-    spread_atr_ratio_max: 0.15   # spread must be <= 15% of M1 ATR
-    stop_hunt_round_step: 0.50   # avoid placing SL near .00/.50 levels
-    stop_hunt_buffer_points: 15
+    enabled: true                # simbolo attivo
+    max_spread_points: 35        # spread massimo assoluto per entrare (punti)
+    spread_median_mult: 1.8      # blocca se spread > 1.8x la mediana mobile (spike)
+    spread_atr_ratio_max: 0.20   # blocca se spread > 20% dell'ATR(M1)
+    stop_hunt_round_step: 0.50   # livelli tondi da evitare per lo SL (.00 / .50)
+    stop_hunt_buffer_points: 15  # distanza minima dello SL dal livello tondo
     spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 1.0, contract_size: 100,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0}
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
+           currency_profit: USD}
   US100:
     enabled: false
     max_spread_points: 250
     spread_median_mult: 2.0
-    spread_atr_ratio_max: 0.20
+    spread_atr_ratio_max: 0.25
     stop_hunt_round_step: 25.0
     stop_hunt_buffer_points: 300
     spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 0.01, contract_size: 1,
-           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0}
+           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0,
+           currency_profit: USD}
   EURUSD:
     enabled: false
     max_spread_points: 15
     spread_median_mult: 2.0
-    spread_atr_ratio_max: 0.25
+    spread_atr_ratio_max: 0.30
     stop_hunt_round_step: 0.0010
     stop_hunt_buffer_points: 20
     spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.0, contract_size: 100000,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0}
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
+           currency_profit: USD}
   AUDCAD:
     enabled: false
     max_spread_points: 25
     spread_median_mult: 2.0
-    spread_atr_ratio_max: 0.30
+    spread_atr_ratio_max: 0.35
     stop_hunt_round_step: 0.0010
     stop_hunt_buffer_points: 20
     spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 0.73, contract_size: 100000,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0}
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
+           currency_profit: CAD}
 
 # -----------------------------------------------------------------------------
-# Strategy: XAU Velocity Scalp (M1 trigger / M5 confirmation / M15 bias)
+# Strategia: XAU Velocity & Micro-Pullback Scalper
 # -----------------------------------------------------------------------------
 strategy:
   name: xau_velocity_scalp
   timeframes: {entry: M1, confirm: M5, trend: M15}
-  history_bars: 400              # bars pulled per timeframe
-  trend_ema: 50                  # M15 bias EMA
-  trend_slope_bars: 3            # EMA slope measured over N M15 bars
-  confirm_ema_fast: 9            # M5 confirmation
+  history_bars: 1000             # barre usate per timeframe (warm-up e calcolo live)
+
+  # --- 1. Bias direzionale M15
+  bias_ema_fast: 9               # EMA veloce M15
+  bias_ema_slow: 21              # EMA lenta M15
+  bias_mode: ema_vwap            # ema | ema_vwap (inclinazione VWAP) | ema_structure (HH/HL)
+  vwap_slope_bars: 4             # inclinazione VWAP misurata su N barre M15
+  structure_bars: 8              # finestra per massimi/minimi crescenti (ema_structure)
+  confirm_enabled: true          # conferma su M5 (EMA veloce/lenta allineate al bias)
+  confirm_ema_fast: 9
   confirm_ema_slow: 21
-  atr_period: 14
-  velocity_lookback: 3           # M1 bars of the momentum burst
-  velocity_atr_mult: 1.2         # |close - close[-N]| >= k * ATR(M1)
-  body_ratio_min: 0.55           # trigger candle body / range
-  close_location_min: 0.70       # close in the top/bottom 30% of the range
-  volume_ma_period: 20
-  volume_spike_mult: 1.4         # tick-volume burst confirmation
-  rsi_period: 7
-  rsi_long_max: 80               # do not buy exhausted moves
-  rsi_short_min: 20
-  max_bar_atr_mult: 3.0          # trigger bar range > 3 ATR = gap/news spike -> skip
-  entry_mode: limit              # market | limit (pullback into the burst)
-  limit_pullback_atr: 0.25
-  limit_expiry_s: 90
-  sl_atr_mult: 1.3               # SL = max(swing extreme, k*ATR) beyond entry
-  sl_min_points: 80
-  sl_max_points: 600
-  tp_r_multiple: 1.6
-  max_hold_minutes: 25           # time-stop: scalps that do not move get cut
+
+  # --- 2. Trigger: Liquidity Sweep / Squeeze + candela di Displacement (M1)
+  trigger_mode: any              # sweep | squeeze | any (uno dei due)
+  atr_period: 14                 # periodo ATR
+  displacement_body_atr: 1.5     # corpo candela d'impulso >= 1.5x ATR(14)
+  displacement_volume_mult: 1.5  # tick volume >= 1.5x media mobile volumi
+  volume_ma_period: 20           # media mobile del tick volume
+  sweep_lookback: 10             # micro-livello di liquidità = max/min ultime N candele
+  sweep_window: 3                # lo sweep deve essere avvenuto nelle ultime K candele
+  squeeze_period: 20             # periodo Bollinger/Keltner
+  squeeze_bb_std: 2.0            # deviazioni standard Bollinger
+  squeeze_kc_atr_mult: 1.5       # ampiezza Keltner in multipli di ATR
+  squeeze_window: 3              # la compressione deve essere attiva nelle ultime K candele
+  max_bar_atr_mult: 4.0          # candela > 4x ATR = spike da news/gap -> ignora
+  max_open_gap_atr: 0.5          # gap open vs close precedente > 0.5 ATR -> ignora
+
+  # --- 3. Smart Entry anti-gap
+  entry_mode: limit              # limit (pullback, consigliato) | market (istantaneo)
+  limit_anchor: retracement      # retracement (% candela d'impulso) | fvg (filo del Fair Value Gap)
+  pullback_pct: 0.40             # ritracciamento 35%-50% della candela d'impulso
+  order_expiration_candles: 3    # cancella il limit se non eseguito entro N candele M1
+  # market: salta l'ingresso se il prezzo è già scappato oltre max_deviation_points
+  # (vedi guardrails.max_deviation_points, usato anche come deviation MT5)
+
+  # --- Stop / target
+  sl_atr_buffer: 0.30            # SL oltre l'estremo dello sweep + 0.3x ATR
+  sl_min_points: 100             # SL mai più vicino di 100 punti (1.00 $) - rumore tick
+  sl_max_points: 800             # SL oltre 800 punti -> trade scartato
+  runner_tp_r: 3.0               # TP finale del runner in R (0 = nessun TP, solo trailing)
 
 # -----------------------------------------------------------------------------
-# Risk & money management
+# Risk management
 # -----------------------------------------------------------------------------
 risk:
-  risk_per_trade_pct: 0.50       # % of equity at SL distance
-  commission_per_lot: 7.0        # round-turn, account currency (used in sizing)
-  max_lot: 5.0
-  max_open_positions: 2          # global
-  max_positions_per_symbol: 1
-  max_margin_usage_pct: 30.0
-  daily_loss_limit_pct: 3.0      # kill-switch on (realized + floating) vs day-start equity
-  daily_trailing_dd_pct: 4.0     # kill-switch on drawdown from intraday equity peak
-  daily_profit_lock_pct: 0.0     # 0 = disabled. Stop trading after +X% on the day
-  max_consecutive_losses: 4
-  max_trades_per_day: 30
-  cooldown_after_loss_s: 120
+  risk_per_trade_pct: 0.50       # % dell'Equity persa se colpito lo SL (lotti dinamici)
+  commission_per_lot: 7.0        # commissione round-turn per lotto (valuta del conto)
+  max_lot: 5.0                   # tetto massimo lotti per ordine
+  max_open_positions: 2          # posizioni + ordini pendenti contemporanei (globale)
+  max_positions_per_symbol: 2    # massimo 1-2 su XAUUSD per non sovraesporre il margine
+  max_margin_usage_pct: 30.0     # % massima del margine libero impegnabile
+  max_daily_loss_pct: 2.5        # perdita giornaliera (chiusa + fluttuante) -> LOCKED
+  daily_trailing_dd_pct: 0.0     # drawdown dal picco intraday -> LOCKED (0 = disattivo)
+  daily_profit_target_pct: 0.0   # target giornaliero -> LOCKED per proteggere i profitti (0 = off)
+  flatten_on_lock: true          # al LOCK chiudi tutte le posizioni e cancella i pendenti
+  max_consecutive_losses: 4      # N perdite consecutive -> LOCKED
+  max_trades_per_day: 30         # numero massimo di ingressi al giorno
+  cooldown_after_loss_s: 120     # pausa dopo uno stop loss (secondi)
 
 # -----------------------------------------------------------------------------
-# Guardrails (anti-gap / anti-slippage / anti-spread-spike)
+# Guardrails (anti-gap / anti-slippage / anti-spread)
 # -----------------------------------------------------------------------------
 guardrails:
-  spread_window: 300             # ticks kept for rolling median
-  spread_min_samples: 30
-  gap_atr_mult: 1.5              # |open - prev close| > k*ATR => gap
-  gap_cooldown_bars: 3
-  tick_jump_atr_mult: 1.0        # tick-to-tick jump > k*ATR => liquidity hole
-  tick_jump_cooldown_s: 30
-  stale_tick_s: 10               # no tick for N s => feed stale, no new entries
-  slippage_window: 10
-  max_avg_slippage_points: 25
-  slippage_pause_s: 600
-  max_deviation_points: 20       # MT5 request "deviation"
+  spread_window: 300             # tick usati per la mediana mobile dello spread
+  spread_min_samples: 30         # campioni minimi prima di usare il filtro dinamico
+  gap_atr_mult: 1.5              # |Open - Close precedente| > 1.5x ATR = gap anomalo
+  tick_jump_atr_mult: 1.0        # salto tick-to-tick > 1x ATR = buco di liquidità
+  gap_block_minutes: 10          # blocco operatività dopo un gap/jump (minuti)
+  stale_tick_s: 10               # nessun tick da N secondi = feed bloccato, no ingressi
+  slippage_window: 10            # ultimi N fill per la media dello slippage
+  max_avg_slippage_points: 25    # slippage medio oltre soglia -> pausa
+  slippage_pause_s: 600          # durata pausa per slippage (secondi)
+  max_deviation_points: 20       # slippage massimo tollerato su MT5 (deviation) + anti-chase
 
+# -----------------------------------------------------------------------------
+# Sessioni (orari nel fuso `timezone`)
+# -----------------------------------------------------------------------------
 sessions:
-  # [start, end) server time. Empty list = trade 24h.
-  windows:
-    - ["09:00", "12:30"]         # London
-    - ["14:30", "18:30"]         # NY open + overlap
-  rollover_blackout: ["23:50", "01:10"]
-  friday_cutoff: "21:00"
-  monday_start: "01:30"
-  news_blackouts: []             # e.g. ["2026-11-06 15:25", "2026-11-06 15:50"] pairs
+  timezone: Europe/Rome          # fuso degli orari sotto (CET/CEST, gestisce l'ora legale)
+  server_timezone: auto          # auto = rileva l'offset dal tick (live) | es. Europe/Athens
+  backtest_server_timezone: Europe/Athens   # fuso dei timestamp nei CSV di backtest
+  windows:                       # finestre operative [inizio, fine)
+    London: ["08:00", "11:30"]
+    NY: ["14:00", "18:30"]
+  rollover_blackout: ["22:45", "01:15"]   # rollover: spread XAU esplodono -> stop tassativo
+  friday_cutoff: "21:30"         # niente nuovi ingressi il venerdì sera
+  monday_start: "02:00"          # niente ingressi all'apertura del lunedì (gap weekend)
+  blocked_slots: []              # slot di 30' esclusi (fuso `timezone`), es. ["08:00", "17:30"]
+                                 # -> usa l'Analisi Oraria del backtest per individuarli
+  news_blackouts: []             # orari news (nel fuso `timezone`), es. ["2026-11-06 14:30"]
   news_blackout_minutes_before: 5
   news_blackout_minutes_after: 10
 
 # -----------------------------------------------------------------------------
-# Trade management
+# Gestione "Hit & Run" della posizione
 # -----------------------------------------------------------------------------
 execution:
-  partial_close_r: 1.0           # at +1R ...
-  partial_close_fraction: 0.5    # ... close 50%
-  break_even_r: 1.0              # move SL to BE at +1R
-  break_even_buffer_points: 10   # lock spread + a few points
-  trailing_start_r: 1.2
-  trailing_atr_mult: 1.0
-  order_retries: 3
+  tp1_r: 1.0                     # TP1 a +1.0R (es. 0.8 per incassare prima)
+  tp1_close_fraction: 0.65       # al TP1 chiudi il 65% della posizione
+  break_even_extra_points: 5     # SL a BE + spread + commissioni + questi punti
+  trailing_mode: candles         # candles (min/max ultime N candele M1) | atr
+  trailing_candles: 2            # N candele M1 per il micro-trailing del runner
+  trailing_atr_mult: 1.0         # distanza trailing in ATR (modalità atr)
+  trailing_only_after_tp1: true  # il trailing parte solo sul runner (dopo TP1)
+  max_trade_duration_minutes: 25 # stale trade killer: durata massima senza TP1
+  stale_require_fade: true       # chiudi solo se il momentum si è spento
+  stale_momentum_threshold: 0.3  # momentum (3 candele) < 0.3x ATR nella direzione = spento
+  order_retries: 3               # retry su requote / price changed
   retry_delay_ms: 150
 
 backtest:
   initial_equity: 10000.0
-  default_spread_points: 20      # used when CSV has no spread column
-  spread_jitter_points: 8        # random extra spread per bar
-  slippage_points: 5             # adverse slippage on market fills / stops
+  default_spread_points: 20      # usato SOLO se i dati non hanno la colonna `spread` reale
+  spread_jitter_points: 8        # rumore aggiunto SOLO allo spread di default (mai a quello reale)
+  simulated_slippage_points: 5   # penalità di slippage su ordini Market e Stop
   seed: 42
+  hourly_min_trades: 5           # trade minimi per giudicare un'ora "perdente"
+  optimize_train_pct: 0.70       # auto-optimizer: quota in-sample (il resto è out-of-sample)
   equity_curve_file: logs/equity_curve.csv
   trades_file: logs/backtest_trades.csv
 
+# -----------------------------------------------------------------------------
+# Dati storici: download da MT5 + cache locale Parquet (incrementale)
+# -----------------------------------------------------------------------------
+data:
+  historical_dir: data/historical          # cache .parquet (esclusa da git)
+  warmup_bars: 1000                        # candele scaricate all'avvio per ogni timeframe
+  warmup_timeframes: [M1, M5, M15, H1]     # timeframe del warm-up
+  download_chunk_days: 15                  # download a blocchi per non saturare il terminale
+
+# -----------------------------------------------------------------------------
+# Livelli istituzionali (calcolati da M5 chiuse, orari in UTC)
+# -----------------------------------------------------------------------------
+levels:
+  enabled: true
+  timeframe: M5                  # timeframe di calcolo dei livelli
+  asian_session_utc: ["00:00", "07:00"]    # Asian High/Low di oggi
+  london_session_utc: ["07:00", "11:00"]   # London High/Low di oggi
+  vwap_band_std: [1.0, 2.0]                # bande VWAP giornaliero a +-1 e +-2 dev. std
+  # priority = segnali su sweep di livello chiave a rischio pieno, gli altri a rischio ridotto
+  # required = SOLO segnali su sweep di livello chiave | off = livelli ignorati dalla strategia
+  filter_mode: priority
+  non_key_risk_mult: 0.5         # moltiplicatore rischio per segnali NON su livello chiave
+  sweep_tolerance_atr: 0.10      # lo sweep conta anche se il minimo arriva a 0.1 ATR dal livello
+
 dashboard:
-  refresh_per_second: 4
-  max_events: 14
+  refresh_per_second: 4          # refresh TUI (2-4 consigliato)
+  max_events: 10                 # righe del Live Execution Log

@@ -13,14 +13,20 @@ class SymbolState:
     symbol: str
     bid: float = 0.0
     ask: float = 0.0
+    digits: int = 2
     spread: float = 0.0
+    max_spread: float = 0.0
     spread_median: float | None = None
-    atr: float = 0.0
+    atr_m1: float = 0.0
+    atr_m5: float = 0.0
     bias: int = 0
     confirm: int = 0
-    velocity_x_atr: float = 0.0
+    momentum: float = 0.0
+    vol_state: str = "-"
+    gap_state: str = "OK"
     guard: str = "-"
     last_signal: str = "-"
+    key_levels: list[tuple[str, float, float]] = field(default_factory=list)  # label, level, dist
 
 
 @dataclass
@@ -34,32 +40,52 @@ class PositionRow:
     tp: float
     r_now: float
     profit: float
-    flags: str = ""
+    be: bool = False
+    tp1: bool = False
+
+
+@dataclass
+class PendingRow:
+    ticket: int
+    symbol: str
+    side: int
+    volume: float
+    price: float
+    sl: float
+    tp: float
+    expires: datetime
 
 
 @dataclass
 class BotState:
     mode: str = "dryrun"
     strategy: str = ""
+    symbol: str = ""
+    session: str = "-"
     connected: bool = False
     autotrading: str = "-"
     server_time: datetime | None = None
+    local_time: datetime | None = None
     account: str = "-"
     currency: str = ""
     balance: float = 0.0
     equity: float = 0.0
+    free_margin: float = 0.0
     margin_level: float = 0.0
-    day_start_equity: float = 0.0
-    day_realized: float = 0.0
+    leverage: int = 0
+    day_pnl: float = 0.0
+    day_pnl_pct: float = 0.0
     trades_today: int = 0
     consecutive_losses: int = 0
-    kill_switch: str | None = None
+    kill_status: str = "ACTIVE"
+    kill_reason: str | None = None
     avg_slippage: float = 0.0
     reconnects: int = 0
     loop_ms: float = 0.0
+    warmup: str = "-"
     symbols: dict[str, SymbolState] = field(default_factory=dict)
     positions: list[PositionRow] = field(default_factory=list)
-    pending_orders: int = 0
+    pending: list[PendingRow] = field(default_factory=list)
     events: deque[tuple[datetime, str, str]] = field(default_factory=lambda: deque(maxlen=200))
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

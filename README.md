@@ -5,108 +5,87 @@
 ![Platform](https://img.shields.io/badge/MetaTrader-5-informational)
 
 Framework Python di **scalping veloce / fast-intraday** a leva per **XAUUSD (Gold)** e CFD principali
-(US100, EURUSD, AUDCAD…) su **MetaTrader 5**, con execution "Hit & Run" su M1/M5, filtro direzionale M15
-e una difesa sistematica dai problemi tipici dell'oro: micro-gap di liquidità, slippage, stop-hunting
-e allargamenti improvvisi dello spread.
+(US100, EURUSD, AUDCAD…) su **MetaTrader 5**. Operazioni "Hit & Run" su M1 con filtro direzionale M15,
+ingressi su micro-pullback e difesa sistematica dai problemi tipici dell'oro: micro-gap di liquidità,
+slippage, stop-hunting e allargamenti improvvisi dello spread.
 
-> ⚠️ **Disclaimer** — Software a scopo di ricerca/educativo. Il trading con leva su CFD comporta un
-> rischio elevato di perdita del capitale. Testa sempre in `dryrun` e su conto demo prima del live.
+> ⚠️ **Disclaimer**: software a scopo di ricerca ed educativo. Il trading con leva su CFD comporta un
+> rischio elevato di perdita del capitale. Usa sempre prima `dryrun` su conto demo.
 
 ---
 
-## Caratteristiche
+## Strategia: XAU Velocity & Micro-Pullback Scalper
 
-| Area | Cosa fa |
+| Fase | Logica |
 |---|---|
-| **Connessione** | `initialize`/login da `.env`, auto-reconnect con back-off esponenziale, check del pulsante AutoTrading, dei permessi account/EA e dell'API Python |
-| **Data feed** | OHLCV M1/M5/M15 **solo barre chiuse** (niente decisioni su candele in formazione), tick snapshot con spread in punti, rilevamento nuova barra a costo minimo |
-| **Strategia** | `XauVelocityScalp`: bias M15 (EMA50 + slope) → conferma M5 (EMA9/21) → trigger M1 su *burst di velocità* (≥ k·ATR) con corpo forte, close sull'estremo, spike di tick-volume, RSI non esausto |
-| **Anti-gap / anti-hunt** | Scarta barre-trigger > 3·ATR (news spike) e barre con gap in apertura; SL oltre lo swing del burst **e** spostato oltre i numeri tondi (`.00`/`.50`) dove si accumula la liquidità degli stop; spread aggiunto agli SL dei short (stoppati sull'ASK) |
-| **Execution** | Market o **Limit su pullback** con scadenza (fill migliore, meno slippage), filling mode auto (FOK/IOC/RETURN), `order_check` pre-flight, retry su requote/price-changed, rispetto di `stops_level`/`freeze_level` |
-| **Trade management** | Chiusura parziale a +1R, Break-Even (+buffer), trailing ATR, time-stop per gli scalp che non partono |
-| **Risk** | Lotti dinamici su equity × rischio% / distanza SL (spread + commissioni inclusi), arrotondamento **sempre per difetto**, rifiuto se < lotto minimo, cap su lotti e utilizzo margine |
-| **Guardrails** | Spread filter dinamico (cap assoluto + mediana mobile + rapporto spread/ATR), gap detector su barre e tick, monitor slippage con pausa automatica, watchdog feed "stale", sessioni/rollover/weekend/news blackout |
-| **Kill-switch giornaliero** | Perdita giornaliera %, drawdown trailing intraday dal picco, N perdite consecutive, max trade/giorno, cooldown post-perdita, profit-lock opzionale |
-| **Backtest** | Motore event-driven veloce (≈40k barre M1/s): spread per barra, commissioni, slippage, SL-first su ambiguità intrabar, gap-through degli stop, stessi guardrail e stessa logica di gestione del live |
-| **Dashboard** | TUI live con `rich`: scanner mercato, conto & rischio, posizioni con R in tempo reale, log eventi |
+| **1. Bias M15** | EMA 9 > EMA 21 con prezzo oltre la EMA lenta, più l'inclinazione del **VWAP giornaliero** (`ema_vwap`) oppure massimi e minimi crescenti (`ema_structure`). Conferma opzionale con EMA M5 |
+| **2. Trigger M1** | Candela di **Displacement** (corpo ≥ 1.5×ATR(14) **e** tick volume ≥ 1.5× la media), preceduta da un **Liquidity Sweep** (perforazione del max/min delle ultime N candele con chiusura di rientro) oppure in **rottura di uno Squeeze** (Bollinger dentro Keltner) |
+| **3. Livelli istituzionali** | PDH/PDL, Asian High/Low (00-07 UTC), London High/Low e VWAP giornaliero ±1σ/±2σ. Lo sweep di un livello chiave ha **priorità assoluta**: `priority` = rischio pieno sui livelli chiave e ridotto sugli altri setup, `required` = si opera solo sui livelli chiave |
+| **4. Smart Entry anti-gap** | `BUY_LIMIT`/`SELL_LIMIT` al ritracciamento del **35-50% della candela d'impulso** o sul filo del **micro Fair Value Gap**. Scadenza dopo `order_expiration_candles` (3 candele M1): se il prezzo scappa via l'ordine viene cancellato. Modalità Market con `max_deviation_points` (deviation MT5 e controllo anti-inseguimento) |
+| **5. Stop strutturale** | Oltre l'estremo dello sweep + 0.3×ATR, mai sotto `sl_min_points`, spostato lontano dai numeri tondi (.00/.50). Sui short si aggiunge lo spread perché lo stop scatta sull'ASK |
 
-## Architettura
+### Gestione "Hit & Run"
+1. **TP1 a +1.0R** (configurabile, es. 0.8R): chiusura immediata del **65%** e Stop Loss del restante 35%
+   a **Break-Even + spread + commissioni**, quindi operazione a rischio zero.
+2. **Micro-trailing del runner** sul minimo/massimo delle **ultime 2 candele M1** (oppure ATR), per
+   catturare gli spike da 10-20 $ senza restituire il profitto.
+3. **Stale Trade Killer**: dopo `max_trade_duration_minutes` (25') senza TP1, se il momentum si è spento
+   la posizione viene chiusa a mercato vicino al pareggio.
 
-```text
-                ┌────────────────────┐
-  settings.yaml │   src/config.py    │ .env (credenziali)
-                └─────────┬──────────┘
-                          │
- ┌───────────────┐   ┌────▼──────────────┐   ┌─────────────────────┐
- │ MT5Connector  │──▶│  LiveTrader loop  │──▶│ Dashboard (rich TUI)│
- │ (reconnect,   │   │  src/core/trader  │   │  thread separato    │
- │  AutoTrading) │   └─┬───────┬───────┬─┘   └─────────────────────┘
- └──────┬────────┘     │       │       │
-        │        ┌─────▼──┐ ┌──▼─────┐ ┌▼────────────────┐
-        └───────▶│DataFeed│ │Strategy│ │ ExecutionEngine │
-                 └────────┘ └──┬─────┘ │ + TradeManager  │
-                               │       └────────▲────────┘
-                     ┌─────────▼─────────┐      │
-                     │ Guardrails        │──────┘
-                     │ + PositionSizer   │
-                     └───────────────────┘
-       BacktestEngine riusa: Strategy · Guardrails · PositionSizer · TradeManager
-```
+### Risk & Guardrails
+- **Lotti dinamici** calcolati da `symbol_info` (`trade_tick_value`, `trade_tick_size`, `volume_min/step`,
+  `currency_profit`): la distanza entry→SL vale esattamente `risk_per_trade_pct` dell'equity, con spread
+  e commissioni inclusi. L'arrotondamento è sempre per difetto e il trade viene rifiutato se servirebbe meno
+  del lotto minimo.
+- **Spread guard**: cap `max_spread_points`, controllo degli spike rispetto alla mediana mobile e del rapporto
+  spread/ATR.
+- **Gap/Jump detector**: un gap anomalo tra Close precedente e Open, oppure un salto tick-to-tick, blocca
+  i nuovi ingressi per `gap_block_minutes`.
+- **Sessioni in CET** (London 08:00-11:30, NY 14:00-18:30) con conversione automatica dall'ora server.
+  **Rollover 22:45-01:15 bloccato**, così come weekend, apertura del lunedì, news ed eventuali slot di 30'
+  esclusi.
+- **Kill-switch giornaliero**: con perdita (chiusa + fluttuante) ≤ `-max_daily_loss_pct` (2.5%) chiude tutto,
+  cancella i pendenti e passa in stato **`LOCKED`** fino al giorno successivo. Profit target opzionale e
+  massimo 1-2 posizioni contemporanee.
 
-**Principio chiave:** la strategia espone un solo metodo vettoriale `compute_features()`. Il backtester lo
-chiama una volta su tutta la storia, il live sull'ultima finestra leggendo l'ultima riga → **stesso codice,
-nessuna divergenza live/backtest**. L'allineamento multi-timeframe usa i tempi di *chiusura* delle barre
-(`align_htf`), quindi è garantita l'assenza di look-ahead (coperta da test).
+### Connettore MT5
+Rilevamento automatico del `filling_mode` (FOK / IOC / RETURN), **`order_check()` prima di ogni
+`order_send()`**, log leggibile di ogni `retcode`, retry su requote e price-changed, `magic_number` dedicato
+(i trade manuali non vengono toccati) e auto-reconnect.
 
-## Struttura
+---
 
-```text
-├── .github/workflows/ci.yml     # ruff + pytest
-├── config/
-│   ├── settings.yaml            # strategia, rischio, sessioni, filtri spread/gap
-│   └── .env.example             # template credenziali MT5
-├── src/
-│   ├── config.py                # loader tipizzato YAML/.env
-│   ├── core/
-│   │   ├── mt5_connector.py     # connessione, auto-reconnect, check AutoTrading
-│   │   ├── data_feed.py         # OHLCV M1/M5/M15 + tick
-│   │   ├── execution.py         # ordini Market/Limit, partial, BE, trailing, paper book
-│   │   ├── trader.py            # loop live/dryrun
-│   │   ├── state.py             # snapshot thread-safe per la dashboard
-│   │   └── diagnostics.py       # diagnostica broker
-│   ├── risk/
-│   │   ├── position_sizer.py    # lotti dinamici su equity/ATR SL
-│   │   └── guardrails.py        # spread, gap, slippage, sessioni, kill-switch
-│   ├── strategies/
-│   │   ├── base_strategy.py     # contratto astratto + Signal
-│   │   ├── indicators.py        # EMA/ATR/RSI vettoriali, align multi-TF
-│   │   └── xau_velocity_scalp.py
-│   ├── backtest/engine.py
-│   └── ui/dashboard.py
-├── tests/
-│   ├── test_risk.py             # unit test sizing/guardrail/management/no-lookahead
-│   └── test_mt5_diag.py         # diagnostica live (skippata in CI)
-├── logs/                        # log runtime (ignorati da git)
-├── main.py                      # CLI
-├── CLAUDE.md
-└── requirements.txt
-```
+## Dati storici & backtest anti-illusione
+
+| Modulo | Cosa fa |
+|---|---|
+| **Downloader + cache Parquet** | `HistoricalStore.fetch_historical_data(symbol, tf, days_back)` usa `copy_rates_range` per M1/M5/M15/H1; `fetch_historical_ticks(symbol, start, end)` usa `copy_ticks_range(…, COPY_TICKS_ALL)` per i veri Bid/Ask. Tutto finisce in `data/historical/*.parquet` (ignorato da git) e i download successivi sono **incrementali**: solo le candele o i giorni di tick mancanti |
+| **Cold-start warm-up** | All'avvio live scarica le ultime **1000 candele** di M1/M5/M15/H1 e costruisce la **mappa dei livelli istituzionali** prima di iniziare ad ascoltare il mercato |
+| **Spread reale** | Il backtest usa la colonna `spread` delle barre MT5 oppure lo spread medio dei tick reali. Lo spread sintetico entra in gioco solo come ultima risorsa e il report lo segnala in rosso |
+| **Slippage & commissioni** | `simulated_slippage_points` su ingressi Market, Stop Loss e uscite a mercato. Commissione round-turn per lotto. Gli stop in gap vengono eseguiti al peggiore tra SL e open |
+| **Intra-bar conservativo** | Se SL e TP (o TP1) cadono nella stessa candela, **vince lo SL**, a meno che ci siano i tick per ricostruire il percorso reale del prezzo |
+| **Report** | Win Rate, Profit Factor, Expectancy ($ e R), Max DD, Sharpe, Sortino, Recovery Factor, qualità d'esecuzione (fill rate dei limit, scaduti, blocchi) e **analisi oraria a slot di 30'** con suggerimento degli slot da escludere |
+| **Auto-optimizer** | Grid search con selezione **in-sample** e validazione **out-of-sample** (`--optimize`) |
 
 ## Installazione
 
-Il live richiede **Windows** con terminale MetaTrader 5 installato e loggato (il pacchetto `MetaTrader5`
-esiste solo per Windows). Backtest, test e CI girano ovunque.
+Il live richiede **Windows** con il terminale MetaTrader 5 installato e loggato (il pacchetto `MetaTrader5`
+esiste solo per Windows). Backtest su CSV o cache, test e CI girano ovunque.
 
 ```bash
 git clone https://github.com/michelegiacoppo/Trading.git xau-quant-scalper
 ```
 
 ```bash
-cd xau-quant-scalper && python -m venv .venv
+cd xau-quant-scalper
 ```
 
 ```bash
-.venv\Scripts\activate        # Windows  (Linux/macOS: source .venv/bin/activate)
+python -m venv .venv
+```
+
+```bash
+.venv\Scripts\activate
 ```
 
 ```bash
@@ -114,88 +93,79 @@ pip install -r requirements.txt
 ```
 
 ```bash
-copy config\.env.example config\.env   # poi inserisci login/password/server
+copy config\.env.example config\.env
 ```
 
-Nel terminale MT5: **Strumenti → Opzioni → Expert Advisor → "Consenti trading algoritmico"** e pulsante
-**AutoTrading** attivo.
+Apri `config\.env` e inserisci `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` (ed eventualmente `MT5_PATH`).
+Nel terminale MT5 abilita **Strumenti → Opzioni → Expert Advisor → "Consenti trading algoritmico"** e
+il pulsante **AutoTrading**.
 
 ## Utilizzo
 
-```bash
-python main.py --mode diag                       # verifica broker, tick_value, filling mode, AutoTrading
+| Comando | Cosa fa |
+|---|---|
+| `python main.py --mode diag` | Diagnostica broker: conto, AutoTrading, tick_value, filling, storico, tick, offset server (nessun ordine) |
+| `python main.py --mode download --days 180` | Riempie e aggiorna la cache Parquet (aggiungi `--ticks` per i tick reali) |
+| `python main.py --mode backtest --days 60` | Scarica 60 giorni da MT5, esegue la simulazione e stampa il report |
+| `python main.py --mode backtest --days 30 --ticks` | Come sopra, con tick reali per lo spread e il percorso intra-bar |
+| `python main.py --mode backtest --days 60 --offline` | Usa solo la cache locale (anche su Linux/macOS) |
+| `python main.py --mode backtest --days 90 --optimize` | Auto-optimizer IS/OOS |
+| `python main.py --mode backtest --csv data/XAUUSD_M1.csv` | Backtest da export MT5, CSV o Parquet |
+| `python main.py --mode dryrun` | Dati live, esecuzione su paper book, dashboard TUI |
+| `python main.py --mode live --confirm-live` | Ordini **reali** |
+
+Opzioni comuni: `--symbols XAUUSD US100`, `--no-ui`, `--config path/settings.yaml`.
+
+## Struttura
+
+```text
+├── .github/workflows/ci.yml       # ruff + pytest (Python 3.10 / 3.12)
+├── config/settings.yaml           # parametri commentati in italiano
+├── config/.env.example            # template credenziali MT5
+├── src/
+│   ├── config.py                  # loader tipizzato YAML/.env
+│   ├── core/
+│   │   ├── mt5_connector.py       # connessione, reconnect, AutoTrading, filling, order_check/send, retcode
+│   │   ├── data_feed.py           # OHLCV/tick live + HistoricalStore (download + cache Parquet incrementale)
+│   │   ├── levels.py              # PDH/PDL, Asian/London range, VWAP ±σ (causali)
+│   │   ├── clock.py               # ora server <-> UTC <-> CET
+│   │   ├── execution.py           # Limit/Market, TP1 65% + BE, micro-trailing, stale killer, paper book
+│   │   ├── trader.py              # warm-up + loop live/dryrun
+│   │   ├── state.py               # snapshot thread-safe per la dashboard
+│   │   └── diagnostics.py         # diagnostica broker
+│   ├── risk/position_sizer.py     # lotti dinamici su equity / SL
+│   ├── risk/guardrails.py         # spread, gap, slippage, sessioni CET, kill-switch LOCKED
+│   ├── strategies/                # base astratta, indicatori, xau_velocity_scalp
+│   ├── backtest/engine.py         # motore realistico (spread reale, slippage, intra-bar via tick)
+│   ├── backtest/report.py         # report istituzionale rich + analisi oraria
+│   ├── backtest/optimizer.py      # grid search IS/OOS
+│   └── ui/dashboard.py            # Quant Desk TUI
+├── tests/                         # unit test offline + diagnostica live
+├── data/historical/               # cache Parquet (ignorata da git)
+├── logs/                          # log runtime (ignorati da git)
+└── main.py
 ```
 
-```bash
-python main.py --mode dryrun                     # dati live, esecuzione su paper book, dashboard TUI
-```
+## Dashboard "Quant Desk"
 
-```bash
-python main.py --mode live --confirm-live        # ordini REALI (richiede il flag esplicito)
-```
+- **Header**: link MT5, simbolo, `LIVE` / `DRY-RUN`, sessione attiva (London/NY/Closed), ora CET.
+- **Account & Risk**: balance, equity, margine libero, leva e margin level, P&L giornaliero (valuta e %),
+  kill-switch `ACTIVE`/`LOCKED`.
+- **Market Microstructure**: bid/ask, spread rispetto al massimo con semaforo, ATR M1/M5, volatilità,
+  stato gap e livelli chiave più vicini.
+- **Posizioni e ordini pendenti**: ticket, tipo, lotti, apertura, SL, TP, R, stato BE/TP1, profitto colorato.
+- **Live Execution Log**: ultime 10 azioni con timestamp al millisecondo.
 
-```bash
-python main.py --mode backtest --csv data/XAUUSD_M1.csv
-```
+## Test
 
-```bash
-python main.py --mode backtest --synthetic --bars 60000   # smoke test senza dati
-```
+| Comando | Cosa fa |
+|---|---|
+| `python -m pytest` | Unit test offline (i test live MT5 vengono saltati) |
+| `ruff check .` | Lint |
+| `ruff format --check .` | Controllo formattazione |
 
-Opzioni utili: `--symbols XAUUSD US100`, `--no-ui` (log a console), `--config path/settings.yaml`.
-
-### Dati per il backtest
-
-Esporta da MT5 (*Visualizza → Simboli → Barre*, timeframe M1) oppure fornisci un CSV con colonne
-`time,open,high,low,close[,tick_volume,spread]`. I prezzi sono BID; la colonna `spread` (in punti) viene
-usata barra per barra, altrimenti si usa `backtest.default_spread_points` + jitter casuale. Output in
-`logs/equity_curve.csv` e `logs/backtest_trades.csv`.
-
-## Configurazione (estratto)
-
-```yaml
-risk:
-  risk_per_trade_pct: 0.50     # % equity alla distanza SL
-  daily_loss_limit_pct: 3.0    # kill-switch
-  max_consecutive_losses: 4
-symbols:
-  XAUUSD:
-    max_spread_points: 35      # cap assoluto
-    spread_median_mult: 1.8    # spike vs mediana mobile
-    spread_atr_ratio_max: 0.15 # spread <= 15% ATR(M1)
-    stop_hunt_round_step: 0.50 # evita SL vicino a .00/.50
-strategy:
-  velocity_atr_mult: 1.2       # burst minimo in multipli di ATR
-  entry_mode: limit            # market | limit (pullback)
-  tp_r_multiple: 1.6
-```
-
-Tutti gli orari di sessione sono in **ora server del broker** (come i timestamp delle barre MT5).
-
-## Test & qualità
-
-```bash
-python -m pytest            # unit test (i test live MT5 sono skippati)
-```
-
-```bash
-ruff check . && ruff format --check .
-```
-
-Diagnostica live sul PC di trading:
-
-```bash
-set RUN_MT5_DIAG=1 && python -m pytest tests/test_mt5_diag.py
-```
-
-## Note sul modello di esecuzione del backtest
-
-- Segnale sulla chiusura della barra *i* → ordine dalla barra *i+1*.
-- Market: fill all'open successivo + spread + slippage avverso.
-- Limit: fill solo se il prezzo **attraversa** il livello entro la scadenza.
-- Se SL e TP sono toccati nella stessa barra vince **lo SL**; gli stop in gap vengono eseguiti al peggiore
-  tra SL e open.
-- Il risultato su dati sintetici è privo di significato statistico: serve solo come smoke test.
+Diagnostica con MT5 aperta: vedi `tests/test_mt5_diag.py` oppure la sezione dedicata in fondo a
+`CLAUDE.md`.
 
 ## Licenza
 

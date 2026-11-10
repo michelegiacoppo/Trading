@@ -15,7 +15,8 @@ from typing import Literal
 
 import pandas as pd
 
-from src.config import StrategyConfig, SymbolConfig, SymbolSpec
+from src.config import LevelsConfig, StrategyConfig, SymbolConfig, SymbolSpec
+from src.core.clock import ServerClock
 
 Side = Literal[1, -1]  # convenience alias for strategy authors
 
@@ -31,7 +32,9 @@ class Signal:
     atr: float
     time: pd.Timestamp
     reason: str = ""
-    expiry_s: int = 0
+    expiry_s: int = 0  # pending-order lifetime (0 = market)
+    key_level: str | None = None  # institutional level swept by the setup, if any
+    risk_mult: float = 1.0  # sizing multiplier (key-level priority)
 
     @property
     def is_buy(self) -> bool:
@@ -45,13 +48,25 @@ class Signal:
 class BaseStrategy(ABC):
     name: str = "base"
 
-    def __init__(self, cfg: StrategyConfig) -> None:
+    def __init__(
+        self,
+        cfg: StrategyConfig,
+        levels_cfg: LevelsConfig | None = None,
+        clock: ServerClock | None = None,
+    ) -> None:
         self.cfg = cfg
+        self.levels_cfg = levels_cfg or LevelsConfig(enabled=False)
+        self.clock = clock or ServerClock()
 
     @property
     def timeframes(self) -> list[str]:
         tfs = self.cfg.timeframes
         return [tfs["entry"], tfs["confirm"], tfs["trend"]]
+
+    @property
+    def required_timeframes(self) -> list[str]:
+        """Timeframes the strategy needs in ``frames`` (may include the levels TF)."""
+        return self.timeframes
 
     @property
     def entry_tf(self) -> str:
