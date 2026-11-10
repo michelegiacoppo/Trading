@@ -2,7 +2,8 @@ XAU QUANT SCALPER - AVVIO RAPIDO (Windows)
 ==========================================
 
 PRIMA DI INIZIARE
- 1. Installa Python 3.12 da https://www.python.org/downloads/
+ 1. Installa Python 3.12 "Windows installer (64-bit)" da https://www.python.org/downloads/windows/
+    -> NON la 32-bit e NON la ARM64 (anche su PC Snapdragon usa la 64-bit x64)
     -> durante l'installazione spunta "Add python.exe to PATH".
  2. Apri MetaTrader 5 e fai login sul conto DEMO.
  3. In MT5: Strumenti > Opzioni > Grafici > "Barre max nel grafico" = Illimitate
