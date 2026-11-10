@@ -11,4 +11,6 @@ set "SYMARG="
 if not "%SYMS%"=="" set "SYMARG=--symbols %SYMS%"
 ".venv\Scripts\python.exe" main.py --mode diag %SYMARG%
 echo.
+echo Report completo salvato in logs\ultima_diagnostica.txt - lo apro in Blocco note.
+if exist "logs\ultima_diagnostica.txt" start "" notepad "logs\ultima_diagnostica.txt"
 pause

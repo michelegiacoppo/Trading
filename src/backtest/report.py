@@ -59,7 +59,7 @@ def print_symbol_table(results: dict[str, BacktestResult], con: Console, title: 
             f"{m.get('avg_spread_points', 0.0):.1f} pt",
             str(m.get("signals", 0)), str(m.get("blocked", 0)),
         )  # fmt: skip
-    Console(width=max(con.width, 130), force_terminal=con.is_terminal).print(t)
+    con.print(t, width=max(con.width, 130))
 
 
 def print_diagnostics(res: BacktestResult, con: Console) -> None:

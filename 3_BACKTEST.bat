@@ -27,5 +27,7 @@ echo [2/2] Backtest ...
 ".venv\Scripts\python.exe" main.py --mode backtest --days %DAYS% %SYMARG% --profile %PROF%
 echo.
 echo Trade salvati in logs\backtest_trades.csv - equity in logs\equity_curve.csv
-echo Copia TUTTO il testo di questa finestra e mandalo per l'analisi.
+echo Copia TUTTO il contenuto del file che si apre (Ctrl+A, Ctrl+C) e mandalo.
+echo Report completo salvato in logs\ultimo_report.txt - lo apro in Blocco note.
+if exist "logs\ultimo_report.txt" start "" notepad "logs\ultimo_report.txt"
 pause

@@ -29,7 +29,7 @@ from src.core.clock import ServerClock
 from src.core.state import BotState
 from src.strategies.xau_velocity_scalp import create_strategy
 
-console = Console()
+console = Console(record=True)  # everything printed is also saved to logs/ultimo_report.txt
 
 
 class StateLogHandler(logging.Handler):
@@ -253,7 +253,7 @@ def run_optimize(settings: Settings, data: dict[str, tuple], clock: ServerClock)
                 txt = f"[{'green' if v > 0 else 'red'}]{txt}[/]"
             cells.append(txt)
         table.add_row(*cells)
-    Console(width=max(console.width, 150)).print(table)
+    console.print(table, width=max(console.width, 150))
     console.print("[dim]Adopt a combination only if its OOS expectancy/PF stay positive.[/]")
     return 0
 
@@ -298,7 +298,7 @@ def run_compare(
                 txt = f"[{'green' if v > 0 else 'red'}]{txt}[/]"
             cells.append(txt)
         table.add_row(name, *cells)
-    Console(width=max(console.width, 130)).print(table)
+    console.print(table, width=max(console.width, 130))
     console.print("[dim]Profiles in config/profiles/*.yaml. A profile is credible only with >= 200 trades "
                   "and positive expectancy; confirm with --optimize (out-of-sample).[/]")  # fmt: skip
     return 0
@@ -387,21 +387,30 @@ def main(argv: list[str] | None = None) -> int:
     ui_mode = args.mode in ("live", "dryrun") and not args.no_ui
     setup_logging(settings, args.mode, to_console=not ui_mode)
 
-    if args.mode == "backtest":
-        # simulated kill-switch / gap events are summarised in the report, not logged per bar
-        logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
-        return run_backtest(settings, args)
+    if args.mode in ("backtest", "diag"):
+        try:
+            if args.mode == "backtest":
+                # simulated kill-switch / gap events are summarised in the report, not per bar
+                logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
+                return run_backtest(settings, args)
+            from src.core.diagnostics import run_diagnostics
+
+            ok = run_diagnostics(settings, load_credentials(), args.resolved_symbols, console)
+            return 0 if ok else 1
+        finally:
+            save_console_report(settings, args.mode)
     if args.mode == "download":
         return run_download(settings, args)
-    if args.mode == "diag":
-        from src.core.diagnostics import run_diagnostics
-
-        return (
-            0
-            if run_diagnostics(settings, load_credentials(), args.resolved_symbols, console)
-            else 1
-        )
     return run_trading(settings, args, dry_run=args.mode == "dryrun")
+
+
+def save_console_report(settings: Settings, mode: str) -> None:
+    """Save the whole console output (plain text) so it can be shared without copy/paste losses."""
+    out = PROJECT_ROOT / settings.general.log_dir / ("ultimo_report.txt" if mode == "backtest"
+                                                     else "ultima_diagnostica.txt")  # fmt: skip
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(console.export_text(clear=False), encoding="utf-8")
+    console.print(f"[dim]Full output saved to {out}[/]")
 
 
 if __name__ == "__main__":

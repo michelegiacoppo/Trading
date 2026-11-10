@@ -14,5 +14,7 @@ set "DAYS=365"
 set /p "DAYS=Quanti giorni di storico (Invio = 365): "
 ".venv\Scripts\python.exe" main.py --mode backtest --days %DAYS% %SYMARG% --offline --compare --gross
 echo.
-echo Copia TUTTO il testo di questa finestra e mandalo per l'analisi.
+echo Copia TUTTO il contenuto del file che si apre (Ctrl+A, Ctrl+C) e mandalo.
+echo Report completo salvato in logs\ultimo_report.txt - lo apro in Blocco note.
+if exist "logs\ultimo_report.txt" start "" notepad "logs\ultimo_report.txt"
 pause

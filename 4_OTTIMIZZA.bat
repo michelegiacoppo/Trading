@@ -15,4 +15,6 @@ echo Ottimizzazione: sceglie i parametri sul 70%% dei dati e li verifica sul 30%
 ".venv\Scripts\python.exe" main.py --mode backtest --days %DAYS% --symbols %SYMS% --profile %PROF% --optimize
 echo.
 echo Guarda SOLO le colonne OOS: devono restare positive.
+echo Report completo salvato in logs\ultimo_report.txt - lo apro in Blocco note.
+if exist "logs\ultimo_report.txt" start "" notepad "logs\ultimo_report.txt"
 pause
