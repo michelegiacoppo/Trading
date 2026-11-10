@@ -352,6 +352,15 @@ class XauVelocityScalp(BaseStrategy):
 STRATEGIES: dict[str, type[BaseStrategy]] = {XauVelocityScalp.name: XauVelocityScalp}
 
 
+def _register_library() -> None:
+    from src.strategies.library import LIBRARY
+
+    STRATEGIES.update(LIBRARY)
+
+
+_register_library()
+
+
 def create_strategy(
     cfg: StrategyConfig,
     levels_cfg: LevelsConfig | None = None,

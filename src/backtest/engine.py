@@ -59,6 +59,9 @@ class BTTrade:
     reason: str
     key_level: str = ""
     risk_money: float = 0.0
+    signal_time: pd.Timestamp | None = None  # close-of-bar time of the signal (features are known)
+    risk_pct: float = 0.0  # % equity risked (incl. key-level multiplier)
+    strategy: str = ""
 
 
 @dataclass
@@ -175,11 +178,13 @@ class BacktestEngine:
         self.sizer = PositionSizer(settings.risk)
         self.manager = TradeManager(settings.execution, settings.risk.commission_per_lot)
 
-    def build_frames(self, m1: pd.DataFrame) -> dict[str, pd.DataFrame]:
-        return {tf: m1 if tf == "M1" else ind.resample_ohlc(m1, tf)
+    def build_frames(self, m1: pd.DataFrame, base_tf: str = "M1") -> dict[str, pd.DataFrame]:
+        """``m1`` holds bars of ``base_tf`` (M1 by default); higher timeframes are resampled."""
+        return {tf: m1 if tf == base_tf else ind.resample_ohlc(m1, tf)
                 for tf in self.strategy.required_timeframes}  # fmt: skip
 
-    def run(self, m1: pd.DataFrame, ticks: pd.DataFrame | None = None) -> BacktestResult:
+    def run(self, m1: pd.DataFrame, ticks: pd.DataFrame | None = None,
+            base_tf: str = "M1") -> BacktestResult:  # fmt: skip
         bt, ex = self.s.backtest, self.s.execution
         spec, pt = self.spec, self.spec.point
         rng = np.random.default_rng(bt.seed)
@@ -205,8 +210,11 @@ class BacktestEngine:
         if bt.gross:  # diagnostic only: is there any raw edge before costs?
             m1["spread"] = 0.0
             spread_source = "ZERO - GROSS TEST (costs removed, NOT tradable)"
+        elif bt.spread_mult != 1.0:  # cost stress test
+            m1["spread"] = m1["spread"] * bt.spread_mult
+            spread_source += f" x{bt.spread_mult:g} (stress)"
 
-        feats = self.strategy.compute_features(self.build_frames(m1))
+        feats = self.strategy.compute_features(self.build_frames(m1, base_tf))
         n = len(feats)
         t = pd.to_datetime(feats["time"]).reset_index(drop=True)
         o, h, lo_, c = (feats[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
@@ -250,7 +258,9 @@ class BacktestEngine:
                 trades.append(BTTrade(self.symbol, pos.side, pd.Timestamp(pos.open_time), t[i],
                                       pos.entry, px, pos.initial_volume, realized_in_pos,
                                       realized_in_pos / risk_money, reason,
-                                      str(pos_meta.get("key_level") or ""), risk_money))  # fmt: skip
+                                      str(pos_meta.get("key_level") or ""), risk_money,
+                                      pos_meta.get("signal_time"), float(pos_meta.get("risk_pct", 0.0)),
+                                      self.strategy.name))  # fmt: skip
                 pos = None
                 realized_in_pos = 0.0
 
@@ -259,7 +269,8 @@ class BacktestEngine:
             pos = PositionView(0, self.symbol, order["side"], order["volume"], fill, order["sl"],
                                order["tp"], when.to_pydatetime(), order["volume"],
                                abs(fill - order["sl"]))  # fmt: skip
-            pos_meta = {"key_level": order.get("key_level"),
+            pos_meta = {"key_level": order.get("key_level"), "signal_time": order.get("signal_time"),
+                        "risk_pct": order.get("risk_pct", 0.0),
                         "risk_money": money_per_lot(abs(fill - order["sl"]), spec) * order["volume"]
                         + self.s.risk.commission_per_lot * order["volume"]}  # fmt: skip
 
@@ -395,7 +406,8 @@ class BacktestEngine:
                     ks.record_entry()
                     order = {"side": s_obj.side, "price": s_obj.entry, "sl": s_obj.stop_loss,
                              "tp": s_obj.take_profit, "volume": size.lots, "key_level": s_obj.key_level,
-                             "expires_idx": i + max(1, self.s.strategy.order_expiration_candles)}  # fmt: skip
+                             "expires_idx": i + max(1, self.s.strategy.order_expiration_candles),
+                             "signal_time": bar_t + timedelta(minutes=tf_min), "risk_pct": risk_pct}  # fmt: skip
                     if s_obj.order_type == "market":
                         j = i + 1
                         fill = (o[j] + spread_pts[j] * pt + slip) if s_obj.is_buy else (o[j] - slip)

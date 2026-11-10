@@ -78,6 +78,9 @@ class MT5Config:
 @dataclass
 class StrategyConfig:
     name: str = "xau_velocity_scalp"
+    params: dict[str, Any] = field(default_factory=dict)  # parameters of library strategies
+    meta_model: str = ""  # path of a meta-labeling model (ML trade filter); "" = off
+    meta_threshold: float = 0.5  # take a signal only if P(win) >= threshold
     timeframes: dict[str, str] = field(
         default_factory=lambda: {"entry": "M1", "confirm": "M5", "trend": "M15"}
     )
@@ -191,6 +194,7 @@ class BacktestConfig:
     simulated_slippage_points: float = 5
     seed: int = 42
     gross: bool = False  # diagnostic: zero spread/slippage/commission (NOT tradable)
+    spread_mult: float = 1.0  # cost stress test: multiply the real spread
     hourly_min_trades: int = 5
     optimize_train_pct: float = 0.70
     equity_curve_file: str = "logs/equity_curve.csv"
@@ -215,6 +219,45 @@ class LevelsConfig:
     filter_mode: str = "priority"  # priority | required | off
     non_key_risk_mult: float = 0.5
     sweep_tolerance_atr: float = 0.10
+
+
+@dataclass
+class LabConfig:
+    families: list[str] = field(
+        default_factory=lambda: ["trend_donchian", "ema_cross", "tsmom", "orb", "vwap_reversion"]
+    )
+    history_days: dict[str, int] = field(
+        default_factory=lambda: {"M5": 365, "M15": 730, "H1": 2190, "H4": 3650}
+    )
+    holdout_months: int = 3
+    wf_test_months: int = 3
+    wf_min_train_months: int = 6
+    wf_top_k: int = 3
+    min_trades: int = 100
+    min_train_trades: int = 30
+    dsr_min: float = 0.90
+    neighbor_min_positive: float = 0.5
+    stress_spread_mult: float = 1.5
+    stress_slippage_mult: float = 2.0
+    candidate_equity: float = 1_000_000.0
+    risk_per_trade_pct: float = 0.25
+    max_survivors: int = 5
+    meta_enabled: bool = True
+    meta_min_trades: int = 200
+    meta_min_keep: float = 0.4
+    models_dir: str = "models"
+
+
+@dataclass
+class HealthConfig:
+    """Live strategy health monitor (filled in by the lab for generated profiles)."""
+
+    enabled: bool = False
+    expected_mean_r: float = 0.0
+    expected_sd_r: float = 1.0
+    min_trades: int = 20
+    z_disable: float = 2.5
+    config_id: str = ""
 
 
 @dataclass
@@ -249,6 +292,8 @@ class Settings:
     dashboard: DashboardConfig
     data: DataConfig = field(default_factory=DataConfig)
     levels: LevelsConfig = field(default_factory=LevelsConfig)
+    lab: LabConfig = field(default_factory=LabConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
 
     @property
     def enabled_symbols(self) -> list[str]:
@@ -304,6 +349,8 @@ class Settings:
             dashboard=_build(DashboardConfig, raw.get("dashboard")),
             data=_build(DataConfig, raw.get("data")),
             levels=_build(LevelsConfig, raw.get("levels")),
+            lab=_build(LabConfig, raw.get("lab")),
+            health=_build(HealthConfig, raw.get("health")),
         )
 
 

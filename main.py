@@ -187,16 +187,26 @@ def apply_gross(settings: Settings) -> None:
 
 
 def run_portfolio(settings: Settings, data: dict[str, tuple], clock: ServerClock):  # noqa: ANN201
-    """Backtest every symbol and merge them: returns (portfolio result, per-symbol results)."""
-    from src.backtest.engine import BacktestEngine, combine_results
+    """Backtest every symbol, then replay all trades on ONE account with global risk rules.
 
+    Returns (portfolio result, standalone per-symbol results).
+    """
+    from src.backtest.engine import BacktestEngine, combine_results
+    from src.lab.portfolio import PortfolioRules, candidate_settings, simulate_portfolio
+
+    cand = candidate_settings(settings)
     results = {}
-    strategy = create_strategy(settings.strategy, settings.levels, clock)
+    strategy = create_strategy(cand.strategy, cand.levels, clock)
     for sym, (m1, ticks, spec) in data.items():
-        results[sym] = BacktestEngine(settings, strategy, sym, spec=spec, clock=clock).run(
-            m1, ticks
-        )
-    return combine_results(results, settings.backtest.initial_equity), results
+        results[sym] = BacktestEngine(cand, strategy, sym, spec=spec, clock=clock).run(m1, ticks)
+    merged = combine_results(results, settings.backtest.initial_equity)
+    trades = [t for r in results.values() for t in r.trades]
+    rules = PortfolioRules.from_risk(settings.risk, settings.backtest.initial_equity)
+    port = simulate_portfolio(trades, rules, ref_risk_pct=settings.risk.risk_per_trade_pct)
+    port.meta = {**merged.meta, **port.meta, "portfolio": True}
+    if not len(port.equity_curve):
+        port.equity_curve = merged.equity_curve
+    return port, results
 
 
 def run_backtest(settings: Settings, args: argparse.Namespace) -> int:
@@ -304,6 +314,40 @@ def run_compare(
     return 0
 
 
+def run_lab(settings: Settings, args: argparse.Namespace) -> int:
+    """Strategy research lab: search, walk-forward, anti-luck filters, ML filter, vault."""
+    from src.lab.runner import Lab, load_lab_data, needed_timeframes
+
+    families = args.families or settings.lab.families
+    tfs = needed_timeframes(families)
+    if args.synthetic:
+        from src.backtest.engine import synthetic_m1
+        from src.strategies.indicators import resample_ohlc
+
+        data = {}
+        for k, sym in enumerate(args.resolved_symbols[:3]):
+            m1 = synthetic_m1(n_bars=args.bars, seed=11 + k)
+            data[sym] = {tf: (resample_ohlc(m1, tf), None) for tf in tfs}
+        clock = ServerClock(settings.sessions.backtest_server_timezone)
+    else:
+        conn, store, clock = _mt5_store(settings, need_mt5=not args.offline)
+        if conn is None and not args.offline:
+            console.print("[yellow]MT5 not available → using the local Parquet cache.[/]")
+        try:
+            console.print(
+                f"Loading history for {len(args.resolved_symbols)} symbols, timeframes {', '.join(tfs)}…"
+            )
+            data = load_lab_data(settings, args.resolved_symbols, store, conn, console, tfs)
+        finally:
+            if conn is not None:
+                conn.shutdown()
+    if not data:
+        console.print("[red]No data for the lab. Run it with MT5 open (or download first).[/]")
+        return 1
+    Lab(settings, data, clock, console, families=families, quick=args.quick).run()
+    return 0
+
+
 def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> int:
     from src.core.mt5_connector import MT5Connector
     from src.core.trader import LiveTrader
@@ -342,7 +386,9 @@ def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="XAU Quant Scalper - MT5 fast-intraday framework")
     p.add_argument(
-        "--mode", choices=["live", "dryrun", "backtest", "diag", "download"], default="dryrun"
+        "--mode",
+        choices=["live", "dryrun", "backtest", "diag", "download", "lab"],
+        default="dryrun",
     )
     p.add_argument("--config", default=None, help="path to settings.yaml")
     p.add_argument("--symbols", nargs="+", default=None, help="override enabled symbols")
@@ -362,6 +408,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gross", action="store_true", help="diagnostic backtest with zero costs (not tradable)"
     )
+    p.add_argument("--families", nargs="+", default=None, help="lab: strategy families to test")
+    p.add_argument("--quick", action="store_true", help="lab: reduced parameter grid")
     p.add_argument("--optimize", action="store_true", help="run the IS/OOS auto-optimizer")
     p.add_argument(
         "--csv", default=None, help="M1 CSV/Parquet (MT5 export or time,open,high,low,close)"
@@ -387,8 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     ui_mode = args.mode in ("live", "dryrun") and not args.no_ui
     setup_logging(settings, args.mode, to_console=not ui_mode)
 
-    if args.mode in ("backtest", "diag"):
+    if args.mode in ("backtest", "diag", "lab"):
+        console.width = max(console.width, 150)  # wide tables (the saved report stays readable)
         try:
+            if args.mode == "lab":
+                logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
+                return run_lab(settings, args)
             if args.mode == "backtest":
                 # simulated kill-switch / gap events are summarised in the report, not per bar
                 logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
@@ -406,8 +458,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def save_console_report(settings: Settings, mode: str) -> None:
     """Save the whole console output (plain text) so it can be shared without copy/paste losses."""
-    out = PROJECT_ROOT / settings.general.log_dir / ("ultimo_report.txt" if mode == "backtest"
-                                                     else "ultima_diagnostica.txt")  # fmt: skip
+    name = {"backtest": "ultimo_report.txt", "lab": "ultimo_laboratorio.txt"}.get(
+        mode, "ultima_diagnostica.txt"
+    )
+    out = PROJECT_ROOT / settings.general.log_dir / name
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(console.export_text(clear=False), encoding="utf-8")
     console.print(f"[dim]Full output saved to {out}[/]")

@@ -178,6 +178,10 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
     exe.add_row("Limit fill rate", f"{filled / placed * 100:.0f}%" if placed else "-")
     exe.add_row("Limits expired (no chase)", str(meta.get("limits_expired", 0)))
     exe.add_row("Kill-switch locks", str(meta.get("kill_switch_locks", 0)))
+    if meta.get("portfolio"):
+        exe.add_row("Candidate trades (all symbols)", str(meta.get("candidates", 0)))
+        for reason, n in (meta.get("rejected") or {}).items():
+            exe.add_row(f"  rejected by account: {reason}", str(n))
     tdf = res.trades_frame()
     for label, sub in (("Key-level sweeps", tdf[tdf["key_level"] != ""]),
                        ("Other setups", tdf[tdf["key_level"] == ""])):  # fmt: skip

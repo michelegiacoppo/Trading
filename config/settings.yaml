@@ -355,6 +355,40 @@ levels:
   non_key_risk_mult: 0.5         # moltiplicatore rischio per segnali NON su livello chiave
   sweep_tolerance_atr: 0.10      # lo sweep conta anche se il minimo arriva a 0.1 ATR dal livello
 
+# -----------------------------------------------------------------------------
+# Laboratorio di strategie (python main.py --mode lab)
+# Cerca strategie su tutte le famiglie, simboli e timeframe, con filtri anti-caso.
+# -----------------------------------------------------------------------------
+lab:
+  families: [trend_donchian, ema_cross, tsmom, orb, vwap_reversion]
+  history_days: {M5: 365, M15: 730, H1: 2190, H4: 3650}   # storico scaricato per timeframe
+  holdout_months: 3              # CASSAFORTE: ultimi 3 mesi mai usati per scegliere, solo verifica finale
+  wf_test_months: 3              # walk-forward: finestre di verifica da 3 mesi...
+  wf_min_train_months: 6         # ...dopo almeno 6 mesi di dati di "allenamento"
+  wf_top_k: 3                    # strategie scelte ad ogni passo del walk-forward
+  min_trades: 100                # una strategia con meno trade non viene considerata
+  min_train_trades: 30
+  dsr_min: 0.90                  # Deflated Sharpe minimo (corregge per il numero di prove fatte)
+  neighbor_min_positive: 0.5     # robustezza: almeno meta' dei parametri vicini deve guadagnare
+  stress_spread_mult: 1.5        # stress test: spread x1.5 ...
+  stress_slippage_mult: 2.0      # ... e slippage x2: deve restare positiva
+  candidate_equity: 1000000      # capitale nominale di misura (evita arrotondamenti dei lotti)
+  risk_per_trade_pct: 0.25       # rischio per trade dei profili generati e del portafoglio del lab
+  max_survivors: 5               # massimo strategie promosse
+  meta_enabled: true             # machine learning: filtro dei segnali ("trader pensante")
+  meta_min_trades: 200           # trade minimi per allenare il filtro ML
+  meta_min_keep: 0.4             # il filtro deve tenere almeno il 40% dei segnali
+  models_dir: models             # dove vengono salvati i modelli ML
+
+# Monitor di salute (compilato dal laboratorio nei profili lab_*): spegne una strategia
+# live se i risultati reali si allontanano troppo da quelli attesi dal backtest.
+health:
+  enabled: false
+  expected_mean_r: 0.0
+  expected_sd_r: 1.0
+  min_trades: 20                 # giudica solo dopo 20 trade
+  z_disable: 2.5                 # spegne se la media reale e' 2.5 errori standard sotto l'attesa
+
 dashboard:
   refresh_per_second: 4          # refresh TUI (2-4 consigliato)
   max_events: 10                 # righe del Live Execution Log
