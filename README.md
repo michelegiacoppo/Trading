@@ -55,6 +55,20 @@ Rilevamento automatico del `filling_mode` (FOK / IOC / RETURN), **`order_check()
 
 ---
 
+## Multi-simbolo e profili
+
+- **Simboli predefiniti** (abilitati in `config/settings.yaml`): XAUUSD, XAGUSD, EURUSD, GBPUSD, USDJPY,
+  AUDUSD, USDCAD, EURJPY, GBPJPY, US100 (più USDCHF, NZDUSD, AUDCAD, US30, GER40 disattivati).
+  Ognuno ha filtri spread, livelli tondi e limiti di stop loss propri (`sl_min_points` / `sl_max_points`).
+- **Suffisso broker**: `general.symbol_suffix: ".m"` trasforma `EURUSD` in `EURUSD.m`. Si possono anche
+  passare nomi come `GOLD` o `XAUUSD-ECN` con `--symbols`: ereditano i parametri del simbolo base.
+- **Backtest di portafoglio**: ogni simbolo viene simulato e i risultati si sommano in un'unica curva di
+  equity, con una tabella per simbolo che mostra dove la strategia funziona. Limite attuale: kill-switch e
+  numero massimo di posizioni nel backtest valgono per singolo simbolo (nel live sono globali).
+- **Profili** (`config/profiles/*.yaml`, sovrascrivono solo le chiavi indicate): `base` (selettivo) e
+  `attivo` (trigger *pullback* di continuazione + breakout, finestra 08-21 CET, rischio 0,25% per trade).
+  `--compare` li confronta sugli stessi dati.
+
 ## Dati storici & backtest anti-illusione
 
 | Modulo | Cosa fa |
@@ -109,7 +123,10 @@ il pulsante **AutoTrading**.
 | `python main.py --mode backtest --days 60` | Scarica 60 giorni da MT5, esegue la simulazione e stampa il report |
 | `python main.py --mode backtest --days 30 --ticks` | Come sopra, con tick reali per lo spread e il percorso intra-bar |
 | `python main.py --mode backtest --days 60 --offline` | Usa solo la cache locale (anche su Linux/macOS) |
-| `python main.py --mode backtest --days 90 --optimize` | Auto-optimizer IS/OOS |
+| `python main.py --mode backtest --days 365 --compare` | Confronta tutti i profili su tutti i simboli abilitati |
+| `python main.py --mode backtest --days 365 --profile attivo` | Backtest con il profilo "attivo" (molti più trade) |
+| `python main.py --mode backtest --days 365 --symbols XAUUSD EURUSD` | Solo i simboli indicati |
+| `python main.py --mode backtest --days 90 --optimize` | Auto-optimizer IS/OOS (meglio su pochi simboli) |
 | `python main.py --mode backtest --csv data/XAUUSD_M1.csv` | Backtest da export MT5, CSV o Parquet |
 | `python main.py --mode dryrun` | Dati live, esecuzione su paper book, dashboard TUI |
 | `python main.py --mode live --confirm-live` | Ordini **reali** |

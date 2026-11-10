@@ -15,7 +15,8 @@ pip install -r requirements.txt
 python -m pytest                                   # offline unit tests (live MT5 tests auto-skip)
 ruff check . && ruff format --check .              # lint (CI runs both)
 python main.py --mode backtest --synthetic         # smoke backtest, no data needed
-python main.py --mode backtest --days 60 [--ticks] [--optimize] [--offline]
+python main.py --mode backtest --days 60 [--ticks] [--optimize] [--offline] [--compare]
+python main.py --mode backtest --days 365 --profile attivo --symbols XAUUSD EURUSD
 python main.py --mode download --days 180 [--ticks]
 python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 terminal only
 ```
@@ -44,6 +45,12 @@ python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 term
 9. **Prices:** bars are BID. Longs enter on ASK / exit on BID; shorts enter on BID / are stopped on ASK.
 10. **Safety:** `--mode live` requires `--confirm-live`. Never commit `.env`, credentials, `data/`,
     `*.parquet`, CSVs or logs. Never weaken kill-switch defaults unless asked.
+
+11. **Multi-symbol.** Symbols come from `Settings.resolve_symbols()` (enabled + `symbol_suffix`,
+    broker aliases via `ensure_symbols`). Per-symbol overrides (`sl_min_points`/`sl_max_points`) win over
+    `strategy`. Backtests run per symbol and are merged by `combine_results` (kill-switch per symbol there).
+12. **Profiles** in `config/profiles/*.yaml` are deep-merged over `settings.yaml` (`sessions.windows`
+    is replaced, not merged). Never put credentials in profiles.
 
 ## Conventions
 - Python ≥ 3.10, full type hints, dataclasses for config/models, `logging` (no `print` in `src/`

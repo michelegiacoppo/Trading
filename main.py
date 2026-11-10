@@ -63,10 +63,6 @@ def setup_logging(settings: Settings, mode: str, to_console: bool) -> Path:
     return log_file
 
 
-def _symbol(settings: Settings, args: argparse.Namespace) -> str:
-    return args.symbols[0] if args.symbols else (settings.enabled_symbols or ["XAUUSD"])[0]
-
-
 def _mt5_store(settings: Settings, need_mt5: bool):  # noqa: ANN202
     """Return (connector|None, HistoricalStore, ServerClock)."""
     from src.core.data_feed import HistoricalStore
@@ -103,11 +99,13 @@ def run_download(settings: Settings, args: argparse.Namespace) -> int:
         console.print("[red]MT5 not available: download needs the terminal (Windows).[/]")
         return 1
     try:
-        for sym in args.symbols or settings.enabled_symbols:
-            conn.select_symbol(sym)
+        for sym in args.resolved_symbols:
+            if not conn.select_symbol(sym):
+                console.print(f"[yellow]{sym}: not available on this broker, skipped[/]")
+                continue
             for tf in settings.data.warmup_timeframes:
                 df = store.fetch_historical_data(sym, tf, args.days)
-                console.print(f"{sym} {tf}: {len(df):,} bars cached → {store.bars_path(sym, tf)}")
+                console.print(f"{sym} {tf}: {len(df):,} bars cached")
             if args.ticks:
                 end = datetime.now()
                 ticks = store.fetch_historical_ticks(sym, end - timedelta(days=args.days), end)
@@ -117,119 +115,183 @@ def run_download(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
-def load_backtest_data(settings: Settings, args: argparse.Namespace, symbol: str):  # noqa: ANN201
-    """Return (m1, ticks|None, clock, broker SymbolSpec|None)."""
+def load_backtest_data(settings: Settings, args: argparse.Namespace, symbols: list[str]):  # noqa: ANN201
+    """Return ({symbol: (m1, ticks|None, broker SymbolSpec|None)}, clock)."""
     from src.backtest.engine import load_m1_csv, synthetic_m1
 
     clock = ServerClock(settings.sessions.backtest_server_timezone)
-    if args.csv:
-        return load_m1_csv(args.csv), None, clock, None
-    if args.synthetic:
-        return synthetic_m1(n_bars=args.bars), None, clock, None
+    if args.csv:  # a CSV holds one instrument
+        return {symbols[0]: (load_m1_csv(args.csv), None, None)}, clock
+    if args.synthetic:  # synthetic prices are gold-like: one symbol only
+        return {symbols[0]: (synthetic_m1(n_bars=args.bars), None, None)}, clock
 
     conn, store, clock = _mt5_store(settings, need_mt5=not args.offline)
-    spec = None
+    if conn is None and not args.offline:
+        console.print("[yellow]MT5 not available → using the local Parquet cache.[/]")
+    data: dict[str, tuple] = {}
+    short_history: list[str] = []
     try:
-        if conn is not None:
-            from src.core.data_feed import DataFeed
-
-            conn.select_symbol(symbol)
-            spec = DataFeed(conn).symbol_spec(symbol)  # real tick_value in account currency
-            console.print(
-                f"Downloading/updating {args.days} days of {symbol} M1 from MT5 (incremental cache)…"
-            )
-            m1 = store.fetch_historical_data(symbol, "M1", args.days)
-        else:
-            if not args.offline:
-                console.print("[yellow]MT5 not available → using the local Parquet cache.[/]")
-            m1 = store.slice_days(store.load_bars(symbol, "M1"), args.days)
-        if m1.empty:
-            raise SystemExit(
-                f"No M1 data for {symbol}: run `--mode download` on the MT5 host or use --csv."
-            )
-        m1 = m1.iloc[:-1]  # drop the possibly-forming last bar
-        span_days = (m1["time"].iloc[-1] - m1["time"].iloc[0]).days
-        if span_days < args.days * 0.8:
-            console.print(
-                f"[bold yellow]⚠ Requested {args.days} days but MT5 returned only {span_days} days "
-                f"({len(m1):,} M1 bars).[/]\n"
-                "  Fix: MT5 > Tools > Options > Charts > 'Max bars in chart' = Unlimited, restart MT5,\n"
-                "  open an XAUUSD M1 chart and scroll back (Home key) so the terminal downloads history,\n"
-                "  then run the download again."
-            )
-        ticks = None
-        if args.ticks:
-            start, end = m1["time"].iloc[0].to_pydatetime(), m1["time"].iloc[-1].to_pydatetime()
+        for symbol in symbols:
+            spec = None
             if conn is not None:
-                console.print("Downloading real ticks (COPY_TICKS_ALL) — this can take a while…")
-                ticks = store.fetch_historical_ticks(symbol, start, end)
+                from src.core.data_feed import DataFeed
+
+                if not conn.select_symbol(symbol):
+                    console.print(f"[yellow]{symbol}: not available on this broker, skipped[/]")
+                    continue
+                spec = DataFeed(conn).symbol_spec(symbol)  # real tick_value in account currency
+                console.print(
+                    f"{symbol}: updating {args.days} days of M1 from MT5 (incremental cache)…"
+                )
+                m1 = store.fetch_historical_data(symbol, "M1", args.days)
             else:
-                ticks = store.load_ticks(symbol, start, end)
-            console.print(f"Ticks loaded: {len(ticks):,}")
+                m1 = store.slice_days(store.load_bars(symbol, "M1"), args.days)
+            if len(m1) < 2000:
+                console.print(f"[yellow]{symbol}: no/too little M1 data, skipped[/]")
+                continue
+            m1 = m1.iloc[:-1]  # drop the possibly-forming last bar
+            span_days = (m1["time"].iloc[-1] - m1["time"].iloc[0]).days
+            if span_days < args.days * 0.8:
+                short_history.append(f"{symbol} ({span_days}d)")
+            ticks = None
+            if args.ticks:
+                start, end = m1["time"].iloc[0].to_pydatetime(), m1["time"].iloc[-1].to_pydatetime()
+                if conn is not None:
+                    console.print(f"{symbol}: downloading real ticks (COPY_TICKS_ALL)…")
+                    ticks = store.fetch_historical_ticks(symbol, start, end)
+                else:
+                    ticks = store.load_ticks(symbol, start, end)
+            data[symbol] = (m1, ticks, spec)
     finally:
         if conn is not None:
             conn.shutdown()
-    return m1, ticks, clock, spec
+    if short_history:
+        console.print(
+            f"[bold yellow]⚠ Requested {args.days} days but MT5 returned less for: "
+            f"{', '.join(short_history)}.[/]\n"
+            "  Fix: MT5 > Tools > Options > Charts > 'Max bars in chart' = Unlimited, restart MT5,\n"
+            "  open an M1 chart of the symbol and scroll back (Home key), then run again."
+        )
+    if not data:
+        raise SystemExit(
+            "No data for any symbol: run `--mode download` on the MT5 host or use --csv."
+        )
+    return data, clock
+
+
+def run_portfolio(settings: Settings, data: dict[str, tuple], clock: ServerClock):  # noqa: ANN201
+    """Backtest every symbol and merge them: returns (portfolio result, per-symbol results)."""
+    from src.backtest.engine import BacktestEngine, combine_results
+
+    results = {}
+    strategy = create_strategy(settings.strategy, settings.levels, clock)
+    for sym, (m1, ticks, spec) in data.items():
+        results[sym] = BacktestEngine(settings, strategy, sym, spec=spec, clock=clock).run(
+            m1, ticks
+        )
+    return combine_results(results, settings.backtest.initial_equity), results
 
 
 def run_backtest(settings: Settings, args: argparse.Namespace) -> int:
-    from src.backtest.engine import BacktestEngine, save_results
-    from src.backtest.report import print_report
+    from src.backtest.engine import save_results
+    from src.backtest.report import print_report, print_symbol_table
 
-    symbol = _symbol(settings, args)
     if not (args.csv or args.synthetic or args.days):
         console.print("[red]Backtest needs --days N (MT5/cache), --csv <file> or --synthetic[/]")
         return 2
-    m1, ticks, clock, spec = load_backtest_data(settings, args, symbol)
+    data, clock = load_backtest_data(settings, args, args.resolved_symbols)
 
+    if args.compare:
+        return run_compare(settings, args, data, clock)
     if args.optimize:
-        from src.backtest.optimizer import optimize
+        return run_optimize(settings, data, clock)
 
-        console.print(
-            "[bold]Auto-optimizer[/]: grid search, ranking in-sample, validating out-of-sample…"
-        )
-        top = optimize(settings, symbol, m1, clock, ticks, spec=spec)
-        table = Table(
-            title=f"Top combinations — in-sample → out-of-sample (split {top.attrs.get('split_time')})"
-        )
-        params = [c for c in top.columns if "." in c]
-        metrics = [
-            ("IS_trades", "IS n"),
-            ("IS_expectancy_r", "IS exp R"),
-            ("IS_profit_factor", "IS PF"),
-            ("OOS_trades", "OOS n"),
-            ("OOS_win_rate_pct", "OOS win%"),
-            ("OOS_expectancy_r", "OOS exp R"),
-            ("OOS_profit_factor", "OOS PF"),
-            ("OOS_net", "OOS net $"),
-        ]
-        for col in params:
-            table.add_column(col.split(".", 1)[1], justify="right")
-        for _, head in metrics:
-            table.add_column(head, justify="right")
-        for _, row in top.iterrows():
-            cells = [str(row[c]) for c in params]
-            for key, _ in metrics:
-                v = row[key]
-                color = (
-                    "green"
-                    if key.startswith("OOS_exp") and v > 0
-                    else "red"
-                    if key.startswith("OOS_exp")
-                    else ""
-                )
-                txt = f"{v:.0f}" if key.endswith("trades") else f"{v:.2f}"
-                cells.append(f"[{color}]{txt}[/]" if color else txt)
-            table.add_row(*cells)
-        Console(width=max(console.width, 150)).print(table)
-        console.print("[dim]Adopt a combination only if its OOS expectancy/PF stay positive.[/]")
-        return 0
-
-    strategy = create_strategy(settings.strategy, settings.levels, clock)
-    res = BacktestEngine(settings, strategy, symbol, spec=spec, clock=clock).run(m1, ticks)
-    print_report(res, settings, symbol, clock, console)
+    label = next(iter(data)) if len(data) == 1 else f"PORTFOLIO ({len(data)} symbols)"
+    console.print(f"Backtesting {', '.join(data)} …")
+    res, per_symbol = run_portfolio(settings, data, clock)
+    print_report(res, settings, label, clock, console)
+    if len(per_symbol) > 1:
+        print_symbol_table(per_symbol, console, "Results by symbol")
     curve, trades = save_results(res, settings)
     console.print(f"[dim]Equity curve → {curve} | trades → {trades}[/]")
+    return 0
+
+
+def run_optimize(settings: Settings, data: dict[str, tuple], clock: ServerClock) -> int:
+    from src.backtest.optimizer import DEFAULT_GRID, optimize
+
+    combos = 1
+    for v in DEFAULT_GRID.values():
+        combos *= len(v)
+    console.print(f"[bold]Auto-optimizer[/]: {combos} combinations x {len(data)} symbols "
+                  f"(~{combos * len(data) * 8 / 60:.0f} min). Ranking in-sample, validating out-of-sample…")  # fmt: skip
+    top = optimize(settings, data, clock)
+    table = Table(
+        title=f"Top combinations — in-sample → out-of-sample (split {top.attrs.get('split_time')})"
+    )
+    params = [c for c in top.columns if "." in c]
+    metrics = [("IS_trades", "IS n"), ("IS_expectancy_r", "IS exp R"), ("IS_profit_factor", "IS PF"),
+               ("OOS_trades", "OOS n"), ("OOS_win_rate_pct", "OOS win%"),
+               ("OOS_expectancy_r", "OOS exp R"), ("OOS_profit_factor", "OOS PF"), ("OOS_net", "OOS net $")]  # fmt: skip
+    for col in params:
+        table.add_column(col.split(".", 1)[1], justify="right")
+    for _, head in metrics:
+        table.add_column(head, justify="right")
+    for _, row in top.iterrows():
+        cells = [str(row[c]) for c in params]
+        for key, _ in metrics:
+            v = row[key]
+            txt = f"{v:.0f}" if key.endswith("trades") else f"{v:.2f}"
+            if key.startswith("OOS_exp"):
+                txt = f"[{'green' if v > 0 else 'red'}]{txt}[/]"
+            cells.append(txt)
+        table.add_row(*cells)
+    Console(width=max(console.width, 150)).print(table)
+    console.print("[dim]Adopt a combination only if its OOS expectancy/PF stay positive.[/]")
+    return 0
+
+
+def run_compare(
+    settings: Settings, args: argparse.Namespace, data: dict[str, tuple], clock: ServerClock
+) -> int:
+    """Run the base config and every profile on the same data and compare them side by side."""
+    from src.backtest.report import print_diagnostics, print_symbol_table
+    from src.config import available_profiles
+
+    names = ["base", *available_profiles()]
+    rows = []
+    for name in names:
+        s = load_settings(args.config, name)
+        s.general.symbol_suffix = settings.general.symbol_suffix
+        s.resolve_symbols(list(data))
+        res, per_symbol = run_portfolio(s, data, clock)
+        console.rule(f"[bold]Profile: {name}")
+        print_diagnostics(res, console)
+        if len(per_symbol) > 1:
+            print_symbol_table(per_symbol, console, f"Profile {name} — by symbol")
+        rows.append((name, res.stats))
+    n_bars = sum(len(m1) for m1, _, _ in data.values())
+    table = Table(title=f"Profile comparison — {len(data)} symbol(s), {n_bars:,} M1 bars")
+    cols = [("trades", "Trades", "{:.0f}"), ("trades_per_week", "Tr/week", "{:.1f}"),
+            ("win_rate_pct", "Win %", "{:.1f}"), ("profit_factor", "PF", "{:.2f}"),
+            ("expectancy_r", "Exp R", "{:+.3f}"), ("expectancy_usd", "Exp $", "{:+.2f}"),
+            ("net_profit", "Net $", "{:+,.2f}"), ("max_drawdown_pct", "Max DD %", "{:.2f}"),
+            ("sharpe", "Sharpe", "{:.2f}")]  # fmt: skip
+    table.add_column("Profile")
+    for _, head, _ in cols:
+        table.add_column(head, justify="right")
+    for name, st in rows:
+        cells = []
+        for key, _, fmt in cols:
+            v = st.get(key)
+            txt = "-" if v is None else ("∞" if v == float("inf") else fmt.format(v))
+            if key in ("expectancy_r", "net_profit") and v is not None:
+                txt = f"[{'green' if v > 0 else 'red'}]{txt}[/]"
+            cells.append(txt)
+        table.add_row(name, *cells)
+    Console(width=max(console.width, 130)).print(table)
+    console.print("[dim]Profiles in config/profiles/*.yaml. A profile is credible only with >= 200 trades "
+                  "and positive expectancy; confirm with --optimize (out-of-sample).[/]")  # fmt: skip
     return 0
 
 
@@ -250,7 +312,7 @@ def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> 
     clock = ServerClock.from_config(settings.sessions.server_timezone)
     strategy = create_strategy(settings.strategy, settings.levels, clock)
     trader = LiveTrader(settings, connector, strategy, state, dry_run=dry_run,
-                        symbols=args.symbols, clock=clock)  # fmt: skip
+                        symbols=args.resolved_symbols, clock=clock)  # fmt: skip
     trader.setup()
     dashboard = None if args.no_ui else Dashboard(state, settings.dashboard.refresh_per_second,
                                                   settings.dashboard.max_events)  # fmt: skip
@@ -282,6 +344,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--offline", action="store_true", help="backtest from the local Parquet cache only"
     )
+    p.add_argument(
+        "--profile", default=None, help="config/profiles/<name>.yaml overlay (e.g. attivo)"
+    )
+    p.add_argument(
+        "--compare", action="store_true", help="backtest base + all profiles side by side"
+    )
     p.add_argument("--optimize", action="store_true", help="run the IS/OOS auto-optimizer")
     p.add_argument(
         "--csv", default=None, help="M1 CSV/Parquet (MT5 export or time,open,high,low,close)"
@@ -300,8 +368,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    settings = load_settings(args.config)
-    settings.ensure_symbols(args.symbols)
+    settings = load_settings(args.config, args.profile)
+    args.resolved_symbols = settings.resolve_symbols(args.symbols)
     ui_mode = args.mode in ("live", "dryrun") and not args.no_ui
     setup_logging(settings, args.mode, to_console=not ui_mode)
 
@@ -314,7 +382,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "diag":
         from src.core.diagnostics import run_diagnostics
 
-        return 0 if run_diagnostics(settings, load_credentials(), args.symbols, console) else 1
+        return (
+            0
+            if run_diagnostics(settings, load_credentials(), args.resolved_symbols, console)
+            else 1
+        )
     return run_trading(settings, args, dry_run=args.mode == "dryrun")
 
 

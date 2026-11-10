@@ -11,6 +11,7 @@ general:
   poll_interval_ms: 250          # frequenza del loop principale (polling tick)
   log_level: INFO                # DEBUG | INFO | WARNING | ERROR
   log_dir: logs                  # cartella file di log
+  symbol_suffix: ""              # suffisso del broker aggiunto ai simboli abilitati, es. ".m" o "-ECN"
 
 mt5:
   timeout_ms: 60000              # attesa max collegamento al terminale (60 s: il primo avvio è lento)
@@ -18,10 +19,14 @@ mt5:
   reconnect_backoff_s: 2.0       # attesa iniziale tra tentativi (raddoppia: 2, 4, 8...)
 
 # -----------------------------------------------------------------------------
-# Strumenti. Ogni simbolo ha i propri filtri spread / anti stop-hunt.
-# `spec` serve SOLO al backtest: in live le specifiche si leggono da symbol_info.
+# Strumenti. Ogni simbolo ha i propri filtri spread / anti stop-hunt e, se serve,
+# i propri limiti di stop loss in punti (sl_min_points / sl_max_points: se assenti
+# valgono quelli della sezione strategy). `spec` serve SOLO al backtest offline/CSV:
+# con i dati MT5 le specifiche (tick value, lotti...) si leggono dal broker.
+# enabled: true = il simbolo viene usato di default (live, dryrun e backtest).
 # -----------------------------------------------------------------------------
 symbols:
+  # ---------------------------------------------------------------- metalli
   XAUUSD:
     enabled: true                # simbolo attivo
     max_spread_points: 35        # spread massimo assoluto per entrare (punti)
@@ -30,38 +35,169 @@ symbols:
     stop_hunt_round_step: 0.50   # livelli tondi da evitare per lo SL (.00 / .50)
     stop_hunt_buffer_points: 15  # distanza minima dello SL dal livello tondo
     spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 1.0, contract_size: 100,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
-           currency_profit: USD}
-  US100:
-    enabled: false
-    max_spread_points: 250
-    spread_median_mult: 2.0
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+  XAGUSD:
+    enabled: true
+    max_spread_points: 35        # 0.035 $
+    spread_median_mult: 1.8
     spread_atr_ratio_max: 0.25
-    stop_hunt_round_step: 25.0
-    stop_hunt_buffer_points: 300
-    spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 0.01, contract_size: 1,
-           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0,
-           currency_profit: USD}
+    stop_hunt_round_step: 0.25
+    stop_hunt_buffer_points: 15
+    sl_min_points: 60            # 0.06 $
+    sl_max_points: 600           # 0.60 $
+    spec: {point: 0.001, digits: 3, tick_size: 0.001, tick_value: 5.0, contract_size: 5000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+
+  # ---------------------------------------------------------- forex major
+  # Nota: sul forex M1 i costi pesano di più rispetto all'ATR -> stop minimi 5-9 pip.
   EURUSD:
-    enabled: false
-    max_spread_points: 15
+    enabled: true
+    max_spread_points: 15        # 1.5 pip
     spread_median_mult: 2.0
-    spread_atr_ratio_max: 0.30
-    stop_hunt_round_step: 0.0010
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.0010 # livelli tondi ogni 10 pip
     stop_hunt_buffer_points: 20
+    sl_min_points: 50            # 5 pip
+    sl_max_points: 400           # 40 pip
     spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.0, contract_size: 100000,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
-           currency_profit: USD}
-  AUDCAD:
-    enabled: false
-    max_spread_points: 25
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+  GBPUSD:
+    enabled: true
+    max_spread_points: 20
     spread_median_mult: 2.0
     spread_atr_ratio_max: 0.35
     stop_hunt_round_step: 0.0010
     stop_hunt_buffer_points: 20
+    sl_min_points: 60
+    sl_max_points: 500
+    spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.0, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+  USDJPY:
+    enabled: true
+    max_spread_points: 20
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.100
+    stop_hunt_buffer_points: 20
+    sl_min_points: 60
+    sl_max_points: 450
+    spec: {point: 0.001, digits: 3, tick_size: 0.001, tick_value: 0.67, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: JPY}
+  AUDUSD:
+    enabled: true
+    max_spread_points: 15
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.0010
+    stop_hunt_buffer_points: 20
+    sl_min_points: 50
+    sl_max_points: 400
+    spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.0, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+  USDCAD:
+    enabled: true
+    max_spread_points: 20
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.0010
+    stop_hunt_buffer_points: 20
+    sl_min_points: 60
+    sl_max_points: 450
     spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 0.73, contract_size: 100000,
-           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0,
-           currency_profit: CAD}
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: CAD}
+  USDCHF:
+    enabled: false
+    max_spread_points: 20
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.0010
+    stop_hunt_buffer_points: 20
+    sl_min_points: 60
+    sl_max_points: 450
+    spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.1, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: CHF}
+  NZDUSD:
+    enabled: false
+    max_spread_points: 20
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.0010
+    stop_hunt_buffer_points: 20
+    sl_min_points: 50
+    sl_max_points: 400
+    spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 1.0, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: USD}
+
+  # ----------------------------------------------------------- forex cross
+  EURJPY:
+    enabled: true
+    max_spread_points: 25
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.100
+    stop_hunt_buffer_points: 20
+    sl_min_points: 70
+    sl_max_points: 500
+    spec: {point: 0.001, digits: 3, tick_size: 0.001, tick_value: 0.67, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: JPY}
+  GBPJPY:
+    enabled: true
+    max_spread_points: 35
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.35
+    stop_hunt_round_step: 0.100
+    stop_hunt_buffer_points: 25
+    sl_min_points: 90
+    sl_max_points: 650
+    spec: {point: 0.001, digits: 3, tick_size: 0.001, tick_value: 0.67, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: JPY}
+  AUDCAD:
+    enabled: false
+    max_spread_points: 25
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.40
+    stop_hunt_round_step: 0.0010
+    stop_hunt_buffer_points: 20
+    sl_min_points: 50
+    sl_max_points: 400
+    spec: {point: 0.00001, digits: 5, tick_size: 0.00001, tick_value: 0.73, contract_size: 100000,
+           volume_min: 0.01, volume_max: 50.0, volume_step: 0.01, stops_level: 0, currency_profit: CAD}
+
+  # ---------------------------------------------------------------- indici
+  # Indici: punti = 0.01 di indice (verifica con 2_DIAGNOSTICA: alcuni broker usano 0.1)
+  US100:
+    enabled: true
+    max_spread_points: 250       # 2.5 punti indice
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.25
+    stop_hunt_round_step: 25.0
+    stop_hunt_buffer_points: 300
+    sl_min_points: 600           # 6 punti indice
+    sl_max_points: 6000          # 60 punti indice
+    spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 0.01, contract_size: 1,
+           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0, currency_profit: USD}
+  US30:
+    enabled: false
+    max_spread_points: 400
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.25
+    stop_hunt_round_step: 50.0
+    stop_hunt_buffer_points: 500
+    sl_min_points: 1000
+    sl_max_points: 9000
+    spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 0.01, contract_size: 1,
+           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0, currency_profit: USD}
+  GER40:
+    enabled: false
+    max_spread_points: 300
+    spread_median_mult: 2.0
+    spread_atr_ratio_max: 0.25
+    stop_hunt_round_step: 25.0
+    stop_hunt_buffer_points: 300
+    sl_min_points: 500
+    sl_max_points: 4500
+    spec: {point: 0.01, digits: 2, tick_size: 0.01, tick_value: 0.01, contract_size: 1,
+           volume_min: 0.1, volume_max: 100.0, volume_step: 0.1, stops_level: 0, currency_profit: EUR}
 
 # -----------------------------------------------------------------------------
 # Strategia: XAU Velocity & Micro-Pullback Scalper
@@ -82,7 +218,12 @@ strategy:
   confirm_ema_slow: 21
 
   # --- 2. Trigger: Liquidity Sweep / Squeeze + candela di Displacement (M1)
-  trigger_mode: any              # sweep | squeeze | any (uno dei due)
+  trigger_mode: any              # sweep | squeeze | any (uno dei due) | pullback | all (any + pullback)
+  # --- trigger "pullback" (continuazione del trend, molto più frequente)
+  pullback_ema: 20               # EMA M1 su cui si attende il ritracciamento
+  pullback_touch_atr: 0.2        # il minimo (long) deve arrivare entro 0.2 ATR dalla EMA
+  pullback_body_atr: 0.3         # candela di ripartenza con corpo >= 0.3 ATR e chiusura oltre il max precedente
+  pullback_window: 3             # il tocco della EMA deve essere avvenuto nelle ultime N candele
   atr_period: 14                 # periodo ATR
   displacement_body_atr: 1.5     # corpo candela d'impulso >= 1.5x ATR(14)
   displacement_volume_mult: 1.5  # tick volume >= 1.5x media mobile volumi
@@ -117,8 +258,8 @@ risk:
   risk_per_trade_pct: 0.50       # % dell'Equity persa se colpito lo SL (lotti dinamici)
   commission_per_lot: 7.0        # commissione round-turn per lotto (valuta del conto)
   max_lot: 5.0                   # tetto massimo lotti per ordine
-  max_open_positions: 2          # posizioni + ordini pendenti contemporanei (globale)
-  max_positions_per_symbol: 2    # massimo 1-2 su XAUUSD per non sovraesporre il margine
+  max_open_positions: 3          # posizioni + ordini pendenti contemporanei su TUTTI i simboli
+  max_positions_per_symbol: 1    # 1 posizione per simbolo (evita di accumulare sullo stesso strumento)
   max_margin_usage_pct: 30.0     # % massima del margine libero impegnabile
   max_daily_loss_pct: 2.5        # perdita giornaliera (chiusa + fluttuante) -> LOCKED
   daily_trailing_dd_pct: 0.0     # drawdown dal picco intraday -> LOCKED (0 = disattivo)

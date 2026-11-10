@@ -34,6 +34,32 @@ def losing_slots(hourly: pd.DataFrame, min_trades: int) -> list[str]:
     return list(bad.index)
 
 
+def print_symbol_table(results: dict[str, BacktestResult], con: Console, title: str) -> None:
+    """One row per symbol: where the strategy works and where it does not."""
+    t = Table(title=title, box=box.SIMPLE_HEAVY)
+    for col in ("Symbol", "Trades", "Tr/week", "Win %", "PF", "Exp R", "Net $", "Max DD %",
+                "Avg spread", "Signals", "Blocked"):  # fmt: skip
+        t.add_column(col, justify="left" if col == "Symbol" else "right")
+    ordered = sorted(results.items(), key=lambda kv: -kv[1].stats.get("net_profit", 0.0))
+    for sym, r in ordered:
+        st, m = r.stats, r.meta
+        n = int(st.get("trades", 0))
+        exp_r = st.get("expectancy_r", 0.0)
+        net = st.get("net_profit", 0.0)
+        pf = st.get("profit_factor", 0.0)
+        t.add_row(
+            sym, str(n), f"{st.get('trades_per_week', 0.0):.1f}",
+            f"{st.get('win_rate_pct', 0.0):.0f}%" if n else "-",
+            _fmt(pf) if n else "-",
+            f"[{_col(exp_r)}]{exp_r:+.3f}[/]" if n else "-",
+            f"[{_col(net)}]{net:+,.2f}[/]",
+            f"{st.get('max_drawdown_pct', 0.0):.2f}" if n else "-",
+            f"{m.get('avg_spread_points', 0.0):.1f} pt",
+            str(m.get("signals", 0)), str(m.get("blocked", 0)),
+        )  # fmt: skip
+    Console(width=max(con.width, 130), force_terminal=con.is_terminal).print(t)
+
+
 def print_diagnostics(res: BacktestResult, con: Console) -> None:
     """Signal funnel + reasons why signals were not traded."""
     meta = res.meta
@@ -44,15 +70,22 @@ def print_diagnostics(res: BacktestResult, con: Console) -> None:
         ft.add_column("Long", justify="right")
         ft.add_column("Short", justify="right")
         ft.add_column("Kept", justify="right")
-        prev = None
+        total = (funnel[0][1] + funnel[0][2]) or 1
+        prev = total
         for label, n_long, n_short in funnel:
             tot = n_long + n_short
-            kept = f"{tot / prev * 100:.0f}%" if prev else ""
-            style = "bold" if label.startswith("=") else ""
+            if label.startswith("M1 bars"):
+                kept = ""
+            elif label.startswith(("  ", "TRIGGER")):
+                kept = f"{tot / total * 100:.1f}% of bars"  # branch rows: share of all bars
+            else:
+                kept = f"{tot / prev * 100:.0f}%" if prev else ""
+            style = "bold" if label.startswith(("=", "TRIGGER")) else ""
             ft.add_row(
                 f"[{style}]{label}[/]" if style else label, f"{n_long:,}", f"{n_short:,}", kept
             )
-            prev = tot if not label.startswith("M1 bars") else tot
+            if not label.startswith("  "):
+                prev = tot
         con.print(ft)
     reasons = meta.get("block_reasons") or {}
     if reasons:
@@ -86,8 +119,10 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
     head.add_row(
         "Period (server)", f"{meta.get('from')} → {meta.get('to')}  ({meta.get('bars'):,} M1 bars)"
     )
+    avg_sp = meta.get("avg_spread_points")
+    avg_txt = f"  avg {avg_sp:.1f} pt" if isinstance(avg_sp, float) and avg_sp == avg_sp else ""
     head.add_row("Spread source", f"[{'bold red' if synthetic else 'green'}]{meta.get('spread_source')}[/]"
-                 f"  avg {meta.get('avg_spread_points', 0):.1f} pt")  # fmt: skip
+                 + avg_txt)  # fmt: skip
     head.add_row("Costs", f"slippage {settings.backtest.simulated_slippage_points} pt on market/stop · "
                  f"commission {settings.risk.commission_per_lot} /lot RT")  # fmt: skip
     ticks = "real ticks" if meta.get("ticks_available") else "no ticks → worst case (SL first)"
@@ -116,6 +151,7 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
         ("Sortino", _fmt(st["sortino"]), _col(st["sortino"], 1)),
         ("Recovery factor", _fmt(st["recovery_factor"]), _col(st["recovery_factor"], 1)),
         ("Max consecutive losses", _fmt(st["max_consecutive_losses"], "{:.0f}"), "white"),
+        ("Trades per week", _fmt(st.get("trades_per_week", 0.0), "{:.1f}"), "white"),
         ("Avg holding time", _fmt(st["avg_hold_minutes"], "{:.1f} min"), "white"),
     ]  # fmt: skip
     for name, val, color in rows:

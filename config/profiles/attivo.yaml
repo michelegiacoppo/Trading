@@ -1,0 +1,27 @@
+# =============================================================================
+#  Profilo ATTIVO - molti più trade quando il bot è acceso
+#  Sovrascrive solo le chiavi indicate di config/settings.yaml (il resto resta uguale).
+#  Uso:  python main.py --mode backtest --days 365 --profile attivo
+# =============================================================================
+strategy:
+  trigger_mode: all              # breakout (sweep/squeeze) + pullback di continuazione sulla EMA20
+  displacement_body_atr: 1.0     # candela d'impulso meno estrema (era 1.5x ATR)
+  displacement_volume_mult: 1.2  # (era 1.5x)
+  sweep_window: 5                # sweep valido nelle ultime 5 candele (era 3)
+  confirm_enabled: false         # niente conferma M5: basta il bias M15
+  sl_min_points: 150             # stop minimo 1.50 $: con stop più stretti i costi superano il 20% di R
+  runner_tp_r: 2.0               # runner più corto: in scalping frequente i target lontani si toccano di rado
+
+sessions:
+  windows:                       # finestra unica continua (rollover e weekend restano bloccati)
+    EU_US: ["08:00", "21:00"]
+
+risk:
+  risk_per_trade_pct: 0.25       # metà rischio per trade: più trade, stessa esposizione giornaliera
+  max_trades_per_day: 60
+  max_consecutive_losses: 8      # 8 x 0.25% = 2% (equivalente a 4 x 0.5% del profilo base)
+  cooldown_after_loss_s: 60
+  # max_daily_loss_pct resta 2.5% (kill-switch invariato)
+
+execution:
+  tp1_r: 0.8                     # incassa il 65% prima (+0.8R)

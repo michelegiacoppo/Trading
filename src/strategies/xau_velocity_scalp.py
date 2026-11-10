@@ -136,6 +136,22 @@ class XauVelocityScalp(BaseStrategy):
         m1["fvg_bear_bottom"] = m1["high"].where(m1["high"] < m1["low"].shift(2))
         m1["velocity"] = m1["close"] - m1["close"].shift(3)
         m1["momentum"] = m1["velocity"] / atr
+        # trend-continuation "pullback" trigger: touch of the M1 EMA, then resumption candle
+        ema_pb = ind.ema(m1["close"], c.pullback_ema)
+        tol = c.pullback_touch_atr * atr
+        w = c.pullback_window
+        touch_bull = (m1["low"] <= ema_pb + tol).astype(float).rolling(w, min_periods=1).max() > 0
+        touch_bear = (m1["high"] >= ema_pb - tol).astype(float).rolling(w, min_periods=1).max() > 0
+        ema_up = ema_pb > ema_pb.shift(3)
+        ema_dn = ema_pb < ema_pb.shift(3)
+        m1["pb_bull"] = (
+            touch_bull & ema_up & (m1["close"] > ema_pb) & (body >= c.pullback_body_atr * atr)
+            & (m1["close"] > m1["high"].shift(1))
+        )  # fmt: skip
+        m1["pb_bear"] = (
+            touch_bear & ema_dn & (m1["close"] < ema_pb) & (-body >= c.pullback_body_atr * atr)
+            & (m1["close"] < m1["low"].shift(1))
+        )  # fmt: skip
         m1["sane"] = (m1["high"] - m1["low"]) <= c.max_bar_atr_mult * atr
         m1["no_gap"] = (m1["open"] - m1["close"].shift(1)).abs() <= c.max_open_gap_atr * atr
 
@@ -169,26 +185,40 @@ class XauVelocityScalp(BaseStrategy):
         key_bear = df["key_level_bear"] != ""
         sweep_ctx_bull = df["sweep_bull"] | key_bull
         sweep_ctx_bear = df["sweep_bear"] | key_bear
-        if c.trigger_mode == "sweep":
+        mode = c.trigger_mode
+        if mode in ("sweep", "pullback"):
             ctx_bull, ctx_bear = sweep_ctx_bull, sweep_ctx_bear
-        elif c.trigger_mode == "squeeze":
+        elif mode == "squeeze":
             ctx_bull, ctx_bear = df["squeeze_bull"], df["squeeze_bear"]
-        else:
+        else:  # any | all
             ctx_bull = sweep_ctx_bull | df["squeeze_bull"]
             ctx_bear = sweep_ctx_bear | df["squeeze_bear"]
+        breakout_bull = df["disp_bull"] & ctx_bull
+        breakout_bear = df["disp_bear"] & ctx_bear
+        pb_bull, pb_bear = df["pb_bull"].astype(bool), df["pb_bear"].astype(bool)
+        if mode == "pullback":
+            trig_bull, trig_bear = pb_bull, pb_bear
+        elif mode == "all":
+            trig_bull, trig_bear = breakout_bull | pb_bull, breakout_bear | pb_bear
+        else:
+            trig_bull, trig_bear = breakout_bull, breakout_bear
         if lv.enabled and lv.filter_mode == "required":
-            ctx_bull = ctx_bull & key_bull
-            ctx_bear = ctx_bear & key_bear
+            trig_bull = trig_bull & key_bull
+            trig_bear = trig_bear & key_bear
+        df["breakout_bull"], df["breakout_bear"] = breakout_bull, breakout_bear
+        df["trig_bull"], df["trig_bear"] = trig_bull, trig_bear
 
         ones = pd.Series(True, index=df.index)
         confirm_bull = (df["m5_confirm"] == 1) if c.confirm_enabled else ones
         confirm_bear = (df["m5_confirm"] == -1) if c.confirm_enabled else ones
         base = df["atr"].notna() & df["sane"].astype(bool) & df["no_gap"].astype(bool)
-        long_ = base & df["disp_bull"] & ctx_bull & (df["m15_bias"] == 1) & confirm_bull
-        short = base & df["disp_bear"] & ctx_bear & (df["m15_bias"] == -1) & confirm_bear
+        long_ = base & trig_bull & (df["m15_bias"] == 1) & confirm_bull
+        short = base & trig_bear & (df["m15_bias"] == -1) & confirm_bear
         df["signal"] = np.where(long_, 1, np.where(short, -1, 0)).astype(int)
-        is_sweep = np.where(df["signal"] > 0, sweep_ctx_bull, sweep_ctx_bear)
-        df["trigger"] = np.where(is_sweep, "sweep", "squeeze")
+        is_long = df["signal"] > 0
+        brk = np.where(is_long, breakout_bull, breakout_bear)
+        swp = np.where(is_long, sweep_ctx_bull, sweep_ctx_bear)
+        df["trigger"] = np.where(~brk, "pullback", np.where(swp, "sweep", "squeeze"))
         return df.reset_index(drop=True)
 
     # -------------------------------------------------------------- funnel
@@ -201,32 +231,42 @@ class XauVelocityScalp(BaseStrategy):
         atr = df["atr"]
         body = df["close"] - df["open"]
         valid = atr.notna() & df["vol_ma"].notna()
-        steps: list[tuple[str, pd.Series, pd.Series]] = [
-            ("M1 bars (valid ATR)", valid, valid),
-            (f"body >= {c.displacement_body_atr}x ATR", body >= c.displacement_body_atr * atr,
-             -body >= c.displacement_body_atr * atr),
-            (f"tick volume >= {c.displacement_volume_mult}x MA",
-             df["vol_ratio"] >= c.displacement_volume_mult, df["vol_ratio"] >= c.displacement_volume_mult),
-            (f"no news bar (range <= {c.max_bar_atr_mult}x ATR) & no open gap",
-             df["sane"].astype(bool) & df["no_gap"].astype(bool),
-             df["sane"].astype(bool) & df["no_gap"].astype(bool)),
-            (f"context: {c.trigger_mode} (sweep/squeeze/key level)",
-             df["sweep_bull"] | df["squeeze_bull"] | (df["key_level_bull"] != ""),
-             df["sweep_bear"] | df["squeeze_bear"] | (df["key_level_bear"] != "")),
-            (f"M15 bias ({c.bias_mode})", df["m15_bias"] == 1, df["m15_bias"] == -1),
-            ("M5 confirmation" + ("" if c.confirm_enabled else " (disabled)"),
+        rows: list[tuple[str, int, int]] = [
+            ("M1 bars (valid ATR)", int(valid.sum()), int(valid.sum()))
+        ]
+
+        def cnt(a: pd.Series, b: pd.Series) -> tuple[int, int]:
+            return int((a.fillna(False).astype(bool) & valid).sum()), int(
+                (b.fillna(False).astype(bool) & valid).sum()
+            )
+
+        if c.trigger_mode != "pullback":
+            d_l, d_s = body >= c.displacement_body_atr * atr, -body >= c.displacement_body_atr * atr
+            rows.append((f"  breakout: body >= {c.displacement_body_atr}x ATR", *cnt(d_l, d_s)))
+            v = df["vol_ratio"] >= c.displacement_volume_mult
+            rows.append((f"  breakout: + tick volume >= {c.displacement_volume_mult}x MA",
+                         *cnt(d_l & v, d_s & v)))  # fmt: skip
+            rows.append(("  breakout: + sweep/squeeze/key-level context",
+                         *cnt(df["breakout_bull"], df["breakout_bear"])))  # fmt: skip
+        if c.trigger_mode in ("pullback", "all"):
+            rows.append((f"  pullback: EMA{c.pullback_ema} touch + resumption",
+                         *cnt(df["pb_bull"], df["pb_bear"])))  # fmt: skip
+        acc_l, acc_s = df["trig_bull"].astype(bool) & valid, df["trig_bear"].astype(bool) & valid
+        rows.append((f"TRIGGER ({c.trigger_mode})", int(acc_l.sum()), int(acc_s.sum())))
+        clean = df["sane"].astype(bool) & df["no_gap"].astype(bool)
+        steps = [
+            ("+ no news bar / no open gap", clean, clean),
+            (f"+ M15 bias ({c.bias_mode})", df["m15_bias"] == 1, df["m15_bias"] == -1),
+            ("+ M5 confirmation" + ("" if c.confirm_enabled else " (disabled)"),
              (df["m5_confirm"] == 1) | (not c.confirm_enabled),
              (df["m5_confirm"] == -1) | (not c.confirm_enabled)),
         ]  # fmt: skip
-        out: list[tuple[str, int, int]] = []
-        acc_l = pd.Series(True, index=df.index)
-        acc_s = pd.Series(True, index=df.index)
         for label, cond_l, cond_s in steps:
             acc_l &= cond_l.fillna(False).astype(bool)
             acc_s &= cond_s.fillna(False).astype(bool)
-            out.append((label, int(acc_l.sum()), int(acc_s.sum())))
-        out.append(("= SIGNALS", int((df["signal"] == 1).sum()), int((df["signal"] == -1).sum())))
-        return out
+            rows.append((label, int(acc_l.sum()), int(acc_s.sum())))
+        rows.append(("= SIGNALS", int((df["signal"] == 1).sum()), int((df["signal"] == -1).sum())))
+        return rows
 
     # --------------------------------------------------------------- order
     def build_signal(
@@ -268,10 +308,16 @@ class XauVelocityScalp(BaseStrategy):
             sl = float(row["struct_high"]) + spread_price + c.sl_atr_buffer * atr
             key = row.get("key_level_bear") or None
 
+        sl_min = (
+            symbol_cfg.sl_min_points if symbol_cfg.sl_min_points is not None else c.sl_min_points
+        )
+        sl_max = (
+            symbol_cfg.sl_max_points if symbol_cfg.sl_max_points is not None else c.sl_max_points
+        )
         dist = side * (entry - sl)
-        if dist < c.sl_min_points * pt:  # never inside tick noise
-            sl = entry - side * c.sl_min_points * pt
-        elif dist > c.sl_max_points * pt:
+        if dist < sl_min * pt:  # never inside tick noise
+            sl = entry - side * sl_min * pt
+        elif dist > sl_max * pt:
             return None
         sl = avoid_round_levels(sl, side, symbol_cfg.stop_hunt_round_step, round_buffer)
         risk = abs(entry - sl)

@@ -348,11 +348,23 @@ class HistoricalStore:
 
     # ------------------------------------------------------------ warmup
     def warmup(self, symbol: str, timeframes: list[str], bars: int) -> dict[str, pd.DataFrame]:
-        """Cold start: last ``bars`` closed candles per timeframe (also refreshes the cache)."""
+        """Cold start: the last ``bars`` CLOSED candles per timeframe, by count (not by calendar).
+
+        Counting bars instead of days keeps the warm-up full after weekends and holidays.
+        The candles are also merged into the Parquet cache.
+        """
+        mt5 = self._mt5()
         out: dict[str, pd.DataFrame] = {}
         for tf in timeframes:
-            days = int(bars * TF_MINUTES[tf] / 1440 * 7 / 5) + 3  # weekends + holidays margin
-            df = self.fetch_historical_data(symbol, tf, days)
-            out[tf] = df.iloc[:-1].tail(bars).reset_index(drop=True) if len(df) > 1 else df
+            raw = mt5.copy_rates_from_pos(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 1, bars)
+            df = rates_to_frame(raw) if raw is not None else pd.DataFrame(columns=BAR_COLUMNS)
+            if raw is None:
+                log.warning("Warm-up %s %s failed: %s", symbol, tf, mt5.last_error())
+            if not df.empty:
+                cached = self.load_bars(symbol, tf)
+                merged = pd.concat([cached, df], ignore_index=True) if not cached.empty else df
+                merged = merged.drop_duplicates("time", keep="last").sort_values("time")
+                self._save(merged.reset_index(drop=True), self.bars_path(symbol, tf))
+            out[tf] = df.reset_index(drop=True)
             log.info("Warm-up %s %s: %d bars", symbol, tf, len(out[tf]))
         return out

@@ -50,6 +50,8 @@ class SymbolConfig:
     spread_atr_ratio_max: float = 0.15
     stop_hunt_round_step: float = 0.0
     stop_hunt_buffer_points: float = 0
+    sl_min_points: float | None = None  # per-symbol override of strategy.sl_min_points
+    sl_max_points: float | None = None  # per-symbol override of strategy.sl_max_points
     spec: dict[str, Any] = field(default_factory=dict)
 
     def backtest_spec(self) -> SymbolSpec:
@@ -63,6 +65,7 @@ class GeneralConfig:
     poll_interval_ms: int = 250
     log_level: str = "INFO"
     log_dir: str = "logs"
+    symbol_suffix: str = ""  # broker suffix appended to enabled symbols, e.g. ".m"
 
 
 @dataclass
@@ -89,7 +92,11 @@ class StrategyConfig:
     confirm_ema_fast: int = 9
     confirm_ema_slow: int = 21
     # trigger
-    trigger_mode: str = "any"  # sweep | squeeze | any
+    trigger_mode: str = "any"  # sweep | squeeze | any | pullback | all
+    pullback_ema: int = 20
+    pullback_touch_atr: float = 0.2
+    pullback_body_atr: float = 0.3
+    pullback_window: int = 3
     atr_period: int = 14
     displacement_body_atr: float = 1.5
     displacement_volume_mult: float = 1.5
@@ -246,6 +253,13 @@ class Settings:
     def enabled_symbols(self) -> list[str]:
         return [s for s, c in self.symbols.items() if c.enabled]
 
+    def resolve_symbols(self, names: list[str] | None = None) -> list[str]:
+        """Symbols to trade: CLI names, else enabled symbols + broker suffix. Registers aliases."""
+        if not names:
+            names = [f"{s}{self.general.symbol_suffix}" for s in self.enabled_symbols]
+        self.ensure_symbols(names)
+        return list(names)
+
     def ensure_symbols(self, names: list[str] | None) -> None:
         """Map broker-specific names (``XAUUSD.m``, ``XAUUSDm``, ``GOLD``...) onto a configured symbol.
 
@@ -298,10 +312,35 @@ def resolve_path(path: str | Path) -> Path:
     return p if p.is_absolute() else PROJECT_ROOT / p
 
 
-def load_settings(path: str | Path | None = None) -> Settings:
+PROFILES_DIR = PROJECT_ROOT / "config" / "profiles"
+_REPLACE_KEYS = {"windows"}  # dict keys replaced wholesale by a profile instead of merged
+
+
+def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict) and k not in _REPLACE_KEYS:
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def available_profiles() -> list[str]:
+    return sorted(p.stem for p in PROFILES_DIR.glob("*.yaml"))
+
+
+def load_settings(path: str | Path | None = None, profile: str | None = None) -> Settings:
+    """Load ``settings.yaml`` and optionally overlay ``config/profiles/<profile>.yaml``."""
     cfg_path = Path(path) if path else DEFAULT_CONFIG
     with cfg_path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
+    if profile and profile not in ("base", "conservativo"):
+        prof_path = PROFILES_DIR / f"{profile}.yaml"
+        if not prof_path.exists():
+            raise ValueError(f"Profile '{profile}' not found. Available: {available_profiles()}")
+        with prof_path.open("r", encoding="utf-8") as fh:
+            raw = _deep_merge(raw, yaml.safe_load(fh) or {})
     return Settings.from_dict(raw)
 
 

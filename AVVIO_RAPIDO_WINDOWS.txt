@@ -10,14 +10,27 @@ PRIMA DI INIZIARE
     Avvia MT5 normalmente, NON come amministratore.
  3. In MT5: Strumenti > Opzioni > Grafici > "Barre max nel grafico" = Illimitate
     (poi riavvia MT5: serve per avere tanto storico M1).
- 4. Controlla nel "Market Watch" il nome esatto dell'oro (XAUUSD, XAUUSD.m, GOLD...).
+ 4. Controlla nel "Market Watch" i nomi dei simboli. Se il broker usa un suffisso
+    (es. EURUSD.m, XAUUSD-ECN) scrivilo in config\settings.yaml -> general: symbol_suffix: ".m"
+    Se un simbolo manca, fai clic destro nel Market Watch > "Mostra tutti".
 
 POI, IN ORDINE (doppio clic):
  1_INSTALLA.bat      crea l'ambiente Python e installa i pacchetti (solo la prima volta)
  2_DIAGNOSTICA.bat   verifica collegamento MT5, simbolo, tick value, storico (nessun ordine)
  3_BACKTEST.bat      scarica lo storico da MT5 e stampa il report del backtest
+ 3b_CONFRONTA_PROFILI.bat  confronta profilo base e profilo attivo (piu' trade) sugli stessi dati
  4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
  5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
+
+PROFILI
+ base   = strategia selettiva (pochi trade, filtri severi)
+ attivo = molti piu' trade (pullback + breakout, 08-21 CET, rischio 0.25%/trade)
+          parametri in config\profiles\attivo.yaml
+
+SIMBOLI
+ Di base il bot lavora su: XAUUSD XAGUSD EURUSD GBPUSD USDJPY AUDUSD USDCAD EURJPY GBPJPY US100
+ Per cambiarli: config\settings.yaml -> symbols -> enabled: true/false
+ Nei .bat puoi anche scrivere solo alcuni simboli, es: XAUUSD EURUSD
 
 COME LEGGERE IL REPORT
  - Spread source deve essere verde ("real")

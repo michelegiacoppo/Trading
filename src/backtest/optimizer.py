@@ -18,14 +18,14 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.engine import BacktestEngine, BTTrade
-from src.config import Settings, SymbolSpec
+from src.config import Settings
 from src.core.clock import ServerClock
 from src.strategies.xau_velocity_scalp import create_strategy
 
 DEFAULT_GRID: dict[str, list[Any]] = {
-    "strategy.displacement_body_atr": [1.2, 1.5, 1.8],
-    "strategy.pullback_pct": [0.35, 0.50],
-    "strategy.trigger_mode": ["sweep", "any"],
+    "strategy.trigger_mode": ["any", "pullback", "all"],
+    "strategy.displacement_body_atr": [1.0, 1.5],
+    "strategy.confirm_enabled": [True, False],
     "execution.tp1_r": [0.8, 1.0],
 }
 
@@ -56,28 +56,33 @@ def trade_metrics(trades: list[BTTrade]) -> dict[str, float]:
     }
 
 
-def score(m: dict[str, float], min_trades: int = 15) -> float:
+def score(m: dict[str, float], min_trades: int = 30) -> float:
     """Expectancy in R scaled by sqrt(N): rewards edge *and* statistical weight."""
     if m["trades"] < min_trades:
         return -math.inf
     return m["expectancy_r"] * math.sqrt(m["trades"])
 
 
-def optimize(settings: Settings, symbol: str, m1: pd.DataFrame, clock: ServerClock,
-             ticks: pd.DataFrame | None = None, grid: dict[str, list[Any]] | None = None,
-             top: int = 5, spec: SymbolSpec | None = None) -> pd.DataFrame:  # fmt: skip
+def optimize(settings: Settings, data: dict[str, tuple], clock: ServerClock,
+             grid: dict[str, list[Any]] | None = None, top: int = 5) -> pd.DataFrame:  # fmt: skip
+    """``data`` maps symbol -> (m1, ticks | None, broker spec | None). Trades of all symbols are pooled."""
     grid = grid or DEFAULT_GRID
     keys = list(grid)
-    split_time = m1["time"].iloc[int(len(m1) * settings.backtest.optimize_train_pct)]
+    all_times = (
+        pd.concat([m1["time"] for m1, _, _ in data.values()]).sort_values().reset_index(drop=True)
+    )
+    split_time = all_times.iloc[int(len(all_times) * settings.backtest.optimize_train_pct)]
     rows = []
     for combo in itertools.product(*(grid[k] for k in keys)):
         s = copy.deepcopy(settings)
         for k, v in zip(keys, combo, strict=True):
             _set(s, k, v)
         strat = create_strategy(s.strategy, s.levels, clock)
-        res = BacktestEngine(s, strat, symbol, spec=spec, clock=clock).run(m1, ticks)
-        ins = [t for t in res.trades if t.entry_time < split_time]
-        oos = [t for t in res.trades if t.entry_time >= split_time]
+        trades: list[BTTrade] = []
+        for sym, (m1, ticks, spec) in data.items():
+            trades += BacktestEngine(s, strat, sym, spec=spec, clock=clock).run(m1, ticks).trades
+        ins = [t for t in trades if t.entry_time < split_time]
+        oos = [t for t in trades if t.entry_time >= split_time]
         mi, mo = trade_metrics(ins), trade_metrics(oos)
         rows.append({**dict(zip(keys, combo, strict=True)),
                      **{f"IS_{k}": v for k, v in mi.items()},

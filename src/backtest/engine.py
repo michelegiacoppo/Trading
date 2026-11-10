@@ -495,7 +495,70 @@ def compute_stats(res: BacktestResult) -> dict[str, float]:
         "recovery_factor": float(net / dd_abs) if dd_abs > 0 else float("inf"),
         "max_consecutive_losses": float(best),
         "avg_hold_minutes": float(hold),
+        "trades_per_week": float(len(tr) / max((eq.index[-1] - eq.index[0]).days, 1) * 7),
     }
+
+
+def combine_results(results: dict[str, BacktestResult], initial_equity: float) -> BacktestResult:
+    """Merge per-symbol runs into one portfolio result.
+
+    Each symbol is simulated independently on the same starting equity, so position sizes are
+    those of an account of ``initial_equity`` trading that symbol. The portfolio equity is the
+    initial equity plus the sum of every symbol's P/L over time.
+    Limitation: the daily kill-switch and ``max_open_positions`` act per symbol here, not across
+    the whole account as in live trading.
+    """
+    if len(results) == 1:
+        return next(iter(results.values()))
+    pnl_curves = []
+    for res in results.values():
+        curve = res.equity_curve - res.initial_equity
+        pnl_curves.append(curve[~curve.index.duplicated(keep="last")])
+    idx = pnl_curves[0].index
+    for c in pnl_curves[1:]:
+        idx = idx.union(c.index)
+    total = sum(c.reindex(idx).ffill().fillna(0.0) for c in pnl_curves)
+    equity = (initial_equity + total).rename("equity")
+    trades = sorted((t for r in results.values() for t in r.trades), key=lambda t: t.exit_time)
+
+    meta: dict[str, object] = {"symbols": list(results), "per_symbol": {}}
+    for key in (
+        "signals",
+        "blocked",
+        "limits_placed",
+        "limits_filled",
+        "limits_expired",
+        "kill_switch_locks",
+        "bars",
+        "intrabar_resolved_by_ticks",
+        "intrabar_pessimistic",
+    ):
+        meta[key] = sum(int(r.meta.get(key, 0)) for r in results.values())  # fmt: skip
+    reasons: dict[str, int] = {}
+    funnel: list[tuple[str, int, int]] = []
+    for sym, r in results.items():
+        meta["per_symbol"][sym] = {**r.stats, "spread_source": r.meta.get("spread_source"),
+                                   "avg_spread_points": r.meta.get("avg_spread_points")}  # fmt: skip
+        for k, v in (r.meta.get("block_reasons") or {}).items():
+            reasons[k] = reasons.get(k, 0) + v
+        f = r.meta.get("funnel") or []
+        if not funnel:
+            funnel = [tuple(row) for row in f]
+        elif len(f) == len(funnel):
+            funnel = [(a[0], a[1] + b[1], a[2] + b[2]) for a, b in zip(funnel, f, strict=True)]
+    meta["block_reasons"] = dict(sorted(reasons.items(), key=lambda kv: -kv[1]))
+    meta["funnel"] = funnel
+    sources = {str(r.meta.get("spread_source")) for r in results.values()}
+    meta["spread_source"] = (
+        sources.pop() if len(sources) == 1 else "mixed: " + ", ".join(sorted(sources))
+    )
+    meta["avg_spread_points"] = float("nan")
+    meta["ticks_available"] = all(r.meta.get("ticks_available") for r in results.values())
+    meta["from"] = str(equity.index[0])
+    meta["to"] = str(equity.index[-1])
+    res = BacktestResult(trades, equity, initial_equity, meta=meta)
+    res.stats = compute_stats(res)
+    return res
 
 
 def hourly_analysis(res: BacktestResult, clock: ServerClock, tz: str,

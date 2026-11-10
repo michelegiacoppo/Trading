@@ -180,3 +180,26 @@ def test_compute_stats_recovery_factor() -> None:
     assert st["profit_factor"] == pytest.approx(4.0)
     assert st["recovery_factor"] == pytest.approx(150 / 50)
     assert st["expectancy_usd"] == pytest.approx(50.0)
+
+
+def test_portfolio_combines_symbols() -> None:
+    from src.backtest.engine import combine_results
+
+    s, eng = _engine()
+    r1 = eng.run(synthetic_m1(8_000, seed=1))
+    r2 = eng.run(synthetic_m1(8_000, seed=2))
+    port = combine_results({"A": r1, "B": r2}, s.backtest.initial_equity)
+    assert len(port.trades) == len(r1.trades) + len(r2.trades)
+    expected = r1.stats["net_profit"] + r2.stats["net_profit"]
+    assert port.stats["net_profit"] == pytest.approx(expected, abs=1e-6)
+    assert set(port.meta["per_symbol"]) == {"A", "B"}
+    assert port.meta["signals"] == r1.meta["signals"] + r2.meta["signals"]
+
+
+def test_resolve_symbols_with_suffix_and_overrides() -> None:
+    s = load_settings()
+    s.general.symbol_suffix = ".m"
+    syms = s.resolve_symbols()
+    assert "EURUSD.m" in syms and "XAUUSD.m" in syms
+    assert s.symbols["EURUSD.m"].sl_min_points == s.symbols["EURUSD"].sl_min_points
+    assert s.symbols["US100.m"].sl_max_points > s.strategy.sl_max_points  # index override

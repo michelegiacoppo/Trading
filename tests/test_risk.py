@@ -378,3 +378,27 @@ def test_broker_symbol_aliases() -> None:
     assert s.symbols["GOLD"].backtest_spec().name == "GOLD"
     with pytest.raises(ValueError):
         s.ensure_symbols(["BTCUSD"])
+
+
+def test_profile_overlay_and_pullback_mode_is_causal() -> None:
+    from src.backtest.engine import synthetic_m1
+    from src.config import available_profiles
+
+    assert "attivo" in available_profiles()
+    s = load_settings(profile="attivo")
+    base = load_settings()
+    assert s.strategy.trigger_mode == "all" and s.risk.risk_per_trade_pct == 0.25
+    assert list(s.sessions.windows) == ["EU_US"]  # windows replaced, not merged
+    assert s.risk.max_daily_loss_pct == base.risk.max_daily_loss_pct  # kill-switch untouched
+    strat = create_strategy(s.strategy, s.levels, UTC_CLOCK)
+    m1 = synthetic_m1(6_000, seed=5)
+    full = strat.compute_features(_frames(strat, m1)).set_index("time")
+    part = strat.compute_features(_frames(strat, m1.iloc[:4_000])).set_index("time")
+    common = part.index[:-20]
+    assert full.loc[common, "signal"].equals(part.loc[common, "signal"])
+    assert (full["trigger"][full["signal"] != 0] == "pullback").any()
+    funnel = strat.signal_funnel(full.reset_index())
+    assert funnel[-1][0] == "= SIGNALS"
+    assert funnel[-1][1] + funnel[-1][2] == int((full["signal"] != 0).sum())
+    with pytest.raises(ValueError):
+        load_settings(profile="does-not-exist")
