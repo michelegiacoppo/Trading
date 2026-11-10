@@ -191,6 +191,43 @@ class XauVelocityScalp(BaseStrategy):
         df["trigger"] = np.where(is_sweep, "sweep", "squeeze")
         return df.reset_index(drop=True)
 
+    # -------------------------------------------------------------- funnel
+    def signal_funnel(self, df: pd.DataFrame) -> list[tuple[str, int, int]]:
+        """How many bars survive each filter, cumulatively (long, short).
+
+        Shows which condition is starving the strategy of signals.
+        """
+        c = self.cfg
+        atr = df["atr"]
+        body = df["close"] - df["open"]
+        valid = atr.notna() & df["vol_ma"].notna()
+        steps: list[tuple[str, pd.Series, pd.Series]] = [
+            ("M1 bars (valid ATR)", valid, valid),
+            (f"body >= {c.displacement_body_atr}x ATR", body >= c.displacement_body_atr * atr,
+             -body >= c.displacement_body_atr * atr),
+            (f"tick volume >= {c.displacement_volume_mult}x MA",
+             df["vol_ratio"] >= c.displacement_volume_mult, df["vol_ratio"] >= c.displacement_volume_mult),
+            (f"no news bar (range <= {c.max_bar_atr_mult}x ATR) & no open gap",
+             df["sane"].astype(bool) & df["no_gap"].astype(bool),
+             df["sane"].astype(bool) & df["no_gap"].astype(bool)),
+            (f"context: {c.trigger_mode} (sweep/squeeze/key level)",
+             df["sweep_bull"] | df["squeeze_bull"] | (df["key_level_bull"] != ""),
+             df["sweep_bear"] | df["squeeze_bear"] | (df["key_level_bear"] != "")),
+            (f"M15 bias ({c.bias_mode})", df["m15_bias"] == 1, df["m15_bias"] == -1),
+            ("M5 confirmation" + ("" if c.confirm_enabled else " (disabled)"),
+             (df["m5_confirm"] == 1) | (not c.confirm_enabled),
+             (df["m5_confirm"] == -1) | (not c.confirm_enabled)),
+        ]  # fmt: skip
+        out: list[tuple[str, int, int]] = []
+        acc_l = pd.Series(True, index=df.index)
+        acc_s = pd.Series(True, index=df.index)
+        for label, cond_l, cond_s in steps:
+            acc_l &= cond_l.fillna(False).astype(bool)
+            acc_s &= cond_s.fillna(False).astype(bool)
+            out.append((label, int(acc_l.sum()), int(acc_s.sum())))
+        out.append(("= SIGNALS", int((df["signal"] == 1).sum()), int((df["signal"] == -1).sum())))
+        return out
+
     # --------------------------------------------------------------- order
     def build_signal(
         self,

@@ -34,6 +34,42 @@ def losing_slots(hourly: pd.DataFrame, min_trades: int) -> list[str]:
     return list(bad.index)
 
 
+def print_diagnostics(res: BacktestResult, con: Console) -> None:
+    """Signal funnel + reasons why signals were not traded."""
+    meta = res.meta
+    funnel = meta.get("funnel") or []
+    if funnel:
+        ft = Table(title="Signal funnel (M1 bars passing each filter, cumulative)", box=box.SIMPLE)
+        ft.add_column("Filter")
+        ft.add_column("Long", justify="right")
+        ft.add_column("Short", justify="right")
+        ft.add_column("Kept", justify="right")
+        prev = None
+        for label, n_long, n_short in funnel:
+            tot = n_long + n_short
+            kept = f"{tot / prev * 100:.0f}%" if prev else ""
+            style = "bold" if label.startswith("=") else ""
+            ft.add_row(
+                f"[{style}]{label}[/]" if style else label, f"{n_long:,}", f"{n_short:,}", kept
+            )
+            prev = tot if not label.startswith("M1 bars") else tot
+        con.print(ft)
+    reasons = meta.get("block_reasons") or {}
+    if reasons:
+        bt = Table(title="Signals not traded — reason", box=box.SIMPLE)
+        bt.add_column("Reason")
+        bt.add_column("Count", justify="right")
+        for r, n in reasons.items():
+            bt.add_row(r, str(n))
+        con.print(bt)
+    if meta.get("signals", 0) and res.equity_curve.size:
+        days = (res.equity_curve.index[-1] - res.equity_curve.index[0]).days or 1
+        per_week = meta["signals"] / days * 7
+        if per_week < 3:
+            con.print(f"[yellow]Only {per_week:.1f} raw signals/week: filters are very selective, "
+                      "results will not be statistically meaningful. See the funnel above.[/]")  # fmt: skip
+
+
 def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: ServerClock,
                  console: Console | None = None) -> pd.DataFrame:  # fmt: skip
     con = console or Console()
@@ -59,6 +95,7 @@ def print_report(res: BacktestResult, settings: Settings, symbol: str, clock: Se
                  f" · pessimistic {meta.get('intrabar_pessimistic', 0)}")  # fmt: skip
     con.print(Panel(head, title="[bold]XAU Quant Scalper — Backtest Report", border_style="gold1"))
 
+    print_diagnostics(res, con)
     if not res.trades:
         con.print("[yellow]No trades generated in this period.[/]")
         return pd.DataFrame()

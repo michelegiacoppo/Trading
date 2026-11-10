@@ -230,6 +230,7 @@ class BacktestEngine:
         realized_in_pos = 0.0
         counters = {"limits_placed": 0, "limits_filled": 0, "limits_expired": 0, "signals": 0,
                     "blocked": 0, "kill_switch_locks": 0}  # fmt: skip
+        block_reasons: dict[str, int] = {}
 
         def close(px: float, vol: float, reason: str, i: int) -> None:
             nonlocal equity, pos, realized_in_pos
@@ -354,9 +355,24 @@ class BacktestEngine:
             if sig[i] != 0 and i + 1 < n:
                 counters["signals"] += 1
                 atr_pts = atr[i] / pt if np.isfinite(atr[i]) else None
-                ok = (pos is None and pending is None and session.check(now)[0]
-                      and ks.check(now)[0] and spread_f.check(spread_pts[i], atr_pts)[0]
-                      and gaps.check(now)[0])  # fmt: skip
+                reason = None
+                if pos is not None or pending is not None:
+                    reason = "trade/order already open"
+                else:
+                    for label, check in (
+                        ("session", session.check(now)),
+                        ("kill-switch/cooldown", ks.check(now)),
+                        ("spread", spread_f.check(spread_pts[i], atr_pts)),
+                        ("gap block", gaps.check(now)),
+                    ):
+                        if not check[0]:
+                            reason = (
+                                f"{label}: {check[1].split(' ')[0]}"
+                                if label == "session"
+                                else label
+                            )
+                            break
+                ok = reason is None
                 s_obj = (
                     self.strategy.build_signal(feats.iloc[i], self.sym_cfg, spec, sp)
                     if ok
@@ -369,6 +385,9 @@ class BacktestEngine:
                                            risk_pct=risk_pct, spread_price=sp)  # fmt: skip
                 if s_obj is None or size is None or not size.ok:
                     counters["blocked"] += 1
+                    if reason is None:
+                        reason = "SL out of range" if s_obj is None else "size < min lot"
+                    block_reasons[reason] = block_reasons.get(reason, 0) + 1
                 else:
                     ks.record_entry()
                     order = {"side": s_obj.side, "price": s_obj.entry, "sl": s_obj.stop_loss,
@@ -395,8 +414,11 @@ class BacktestEngine:
 
         curve = pd.Series(eq_vals, index=pd.DatetimeIndex(t), name="equity")
         res = BacktestResult(trades, curve, bt.initial_equity)
+        funnel = getattr(self.strategy, "signal_funnel", None)
         res.meta = {
             **counters,
+            "block_reasons": dict(sorted(block_reasons.items(), key=lambda kv: -kv[1])),
+            "funnel": funnel(feats) if callable(funnel) else [],
             "spread_source": spread_source,
             "avg_spread_points": float(np.nanmean(spread_pts)),
             "intrabar_resolved_by_ticks": path.resolved,

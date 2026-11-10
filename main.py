@@ -148,6 +148,15 @@ def load_backtest_data(settings: Settings, args: argparse.Namespace, symbol: str
                 f"No M1 data for {symbol}: run `--mode download` on the MT5 host or use --csv."
             )
         m1 = m1.iloc[:-1]  # drop the possibly-forming last bar
+        span_days = (m1["time"].iloc[-1] - m1["time"].iloc[0]).days
+        if span_days < args.days * 0.8:
+            console.print(
+                f"[bold yellow]⚠ Requested {args.days} days but MT5 returned only {span_days} days "
+                f"({len(m1):,} M1 bars).[/]\n"
+                "  Fix: MT5 > Tools > Options > Charts > 'Max bars in chart' = Unlimited, restart MT5,\n"
+                "  open an XAUUSD M1 chart and scroll back (Home key) so the terminal downloads history,\n"
+                "  then run the download again."
+            )
         ticks = None
         if args.ticks:
             start, end = m1["time"].iloc[0].to_pydatetime(), m1["time"].iloc[-1].to_pydatetime()
