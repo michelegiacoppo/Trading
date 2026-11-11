@@ -78,6 +78,9 @@ def render_account(st: BotState) -> Panel:
     tb.add_row("Kill-switch", ks)
     tb.add_row("Reconnects", str(st.reconnects))
     tb.add_row("Warm-up", st.warmup)
+    for name, status in st.health_by.items():
+        color = "bold red" if status == "DISABLED" else "white"
+        tb.add_row(f"Health {name[:14]}", f"[{color}]{status}[/]")
     return Panel(tb, title="[bold]Account & Risk", border_style="cyan")
 
 

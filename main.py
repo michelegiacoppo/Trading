@@ -348,6 +348,23 @@ def run_lab(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def expand_profiles(names: list[str] | None) -> list[str]:
+    """``--profiles lab`` = every profile promoted by the strategy lab (config/profiles/lab_*)."""
+    from src.config import available_profiles
+
+    if not names:
+        return []
+    out: list[str] = []
+    for n in names:
+        if n == "lab":
+            out += [p for p in available_profiles() if p.startswith("lab_")]
+        else:
+            out.append(n)
+    if names and not out:
+        console.print("[yellow]No lab_* profile found: run the lab first (6_LABORATORIO.bat).[/]")
+    return list(dict.fromkeys(out))
+
+
 def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> int:
     from src.core.mt5_connector import MT5Connector
     from src.core.trader import LiveTrader
@@ -363,9 +380,23 @@ def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> 
         console.print("[red]MetaTrader5 package not available on this OS (Windows only).[/]")
         return 1
     clock = ServerClock.from_config(settings.sessions.server_timezone)
-    strategy = create_strategy(settings.strategy, settings.levels, clock)
-    trader = LiveTrader(settings, connector, strategy, state, dry_run=dry_run,
-                        symbols=args.resolved_symbols, clock=clock)  # fmt: skip
+    profiles = expand_profiles(args.profiles)
+    if profiles:  # several strategies on one account (e.g. every lab_* profile)
+        from src.core.multi_trader import MultiTrader
+
+        traders = []
+        for name in profiles:
+            s = load_settings(args.config, name)
+            s.general.symbol_suffix = settings.general.symbol_suffix
+            syms = s.resolve_symbols(args.symbols)
+            strat = create_strategy(s.strategy, s.levels, clock)
+            traders.append(LiveTrader(s, connector, strat, state, dry_run=dry_run, symbols=syms,
+                                      clock=clock, tag=name.removeprefix("lab_")))  # fmt: skip
+        trader = MultiTrader(traders)
+    else:
+        strategy = create_strategy(settings.strategy, settings.levels, clock)
+        trader = LiveTrader(settings, connector, strategy, state, dry_run=dry_run,
+                            symbols=args.resolved_symbols, clock=clock)  # fmt: skip
     trader.setup()
     dashboard = None if args.no_ui else Dashboard(state, settings.dashboard.refresh_per_second,
                                                   settings.dashboard.max_events)  # fmt: skip
@@ -408,6 +439,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--gross", action="store_true", help="diagnostic backtest with zero costs (not tradable)"
     )
+    p.add_argument("--profiles", nargs="+", default=None,
+                   help="dryrun/live: run several profiles together ('lab' = all lab_* profiles)")  # fmt: skip
     p.add_argument("--families", nargs="+", default=None, help="lab: strategy families to test")
     p.add_argument("--quick", action="store_true", help="lab: reduced parameter grid")
     p.add_argument("--optimize", action="store_true", help="run the IS/OOS auto-optimizer")
@@ -453,6 +486,8 @@ def main(argv: list[str] | None = None) -> int:
             save_console_report(settings, args.mode)
     if args.mode == "download":
         return run_download(settings, args)
+    if args.profiles and not expand_profiles(args.profiles):
+        return 1
     return run_trading(settings, args, dry_run=args.mode == "dryrun")
 
 

@@ -164,3 +164,26 @@ def test_lab_end_to_end_smoke(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     assert len(res["cands"]) > 0
     assert (tmp_path / "logs" / "lab" / "journal.jsonl").exists()
     assert all(c.status for c in res["cands"])
+
+
+# ------------------------------------------------------------ health
+def test_health_monitor_disables_on_divergence(tmp_path) -> None:  # noqa: ANN001
+    from datetime import datetime
+
+    from src.config import HealthConfig
+    from src.core.health import LiveTradeLog, StrategyHealth
+
+    h = StrategyHealth(HealthConfig(enabled=True, expected_mean_r=0.2, expected_sd_r=1.0,
+                                    min_trades=20, z_disable=2.5))  # fmt: skip
+    for _ in range(19):
+        h.record(-1.0)
+    assert h.allows_entries  # not judged before min_trades
+    h.record(-1.0)
+    assert not h.allows_entries and "z=" in (h.disabled_reason or "")
+    ok = StrategyHealth(HealthConfig(enabled=True, expected_mean_r=0.2, expected_sd_r=1.0))
+    for i in range(40):
+        ok.record(1.0 if i % 2 else -0.6)
+    assert ok.allows_entries
+    log = LiveTradeLog(tmp_path / "t.csv")
+    log.append("p", "XAUUSD", 1, 10.0, 20.0, 0.5, "TP", datetime(2026, 11, 11, 10))
+    assert (tmp_path / "t.csv").read_text().count("\n") == 2

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -32,9 +34,11 @@ from src.config import Settings, resolve_path
 from src.core.clock import ServerClock
 from src.core.data_feed import DataFeed, HistoricalStore, TickSnapshot
 from src.core.execution import ExecutionEngine, MarketContext
+from src.core.health import LiveTradeLog, StrategyHealth
 from src.core.levels import KeyLevelMap, compute_levels
 from src.core.mt5_connector import MT5Connector
 from src.core.state import BotState, PendingRow, PositionRow, SymbolState
+from src.lab.meta import MetaModel
 from src.risk.guardrails import EntryContext, Guardrails
 from src.risk.position_sizer import PositionSizer
 from src.strategies import indicators as ind
@@ -50,8 +54,9 @@ def _utcnow() -> datetime:
 class LiveTrader:
     def __init__(self, settings: Settings, connector: MT5Connector, strategy: BaseStrategy,
                  state: BotState, dry_run: bool = True, symbols: list[str] | None = None,
-                 clock: ServerClock | None = None) -> None:  # fmt: skip
+                 clock: ServerClock | None = None, tag: str = "") -> None:  # fmt: skip
         self.s = settings
+        self.tag = tag  # profile name when several strategies run together
         self.conn = connector
         self.strategy = strategy
         self.state = state
@@ -73,17 +78,35 @@ class LiveTrader:
         self._autotrading_ok = False
         self._offset_warned = False
         self._running = False
+        self.peers: list[LiveTrader] = []  # other strategies sharing the account (MultiTrader)
+        self.equity_provider: Callable[[Any], float] | None = None
+        self.health = StrategyHealth(settings.health)
+        self.trade_log = LiveTradeLog(resolve_path(settings.general.log_dir) / "live_trades.csv")
+        self._risk_by_ticket: dict[int, float] = {}
+        self._pnl_by_ticket: dict[int, float] = {}
+        self.meta: MetaModel | None = None
+        if settings.strategy.meta_model:
+            path = resolve_path(settings.strategy.meta_model)
+            if path.exists():
+                self.meta = MetaModel.load(path)
+                self.meta.threshold = settings.strategy.meta_threshold
+            else:
+                log.warning("Meta model %s not found: trading without ML filter", path)
+
+    def key(self, sym: str) -> str:
+        """Dashboard row key (symbol + profile when several strategies run together)."""
+        return f"{sym} · {self.tag}" if self.tag else sym
 
     # ------------------------------------------------------------- setup
     def setup(self) -> None:
-        if not self.conn.connect():
+        if not self.conn.is_connected() and not self.conn.connect():
             raise RuntimeError("Cannot connect to MetaTrader 5 (see logs)")
         for sym in self.symbols:
             if not self.conn.select_symbol(sym):
                 raise RuntimeError(f"Symbol {sym} unavailable on this broker")
             spec = self.feed.symbol_spec(sym)
-            self.state.symbols[sym] = SymbolState(
-                sym, digits=spec.digits, max_spread=self.s.symbols[sym].max_spread_points
+            self.state.symbols[self.key(sym)] = SymbolState(
+                self.key(sym), digits=spec.digits, max_spread=self.s.symbols[sym].max_spread_points
             )
             log.info("%s spec: %s", sym, spec)
         if self.clock.is_auto:
@@ -101,13 +124,15 @@ class LiveTrader:
         d = self.s.data
         for sym in self.symbols:
             t0 = time.perf_counter()
-            frames = self.store.warmup(sym, d.warmup_timeframes, d.warmup_bars)
+            tfs = list(dict.fromkeys([*d.warmup_timeframes, *self.strategy.required_timeframes]))
+            frames = self.store.warmup(sym, tfs, d.warmup_bars)
             lv_tf = self.s.levels.timeframe
             if self.s.levels.enabled and lv_tf in frames and not frames[lv_tf].empty:
                 self.levels[sym] = KeyLevelMap.from_frame(
                     compute_levels(frames[lv_tf], self.s.levels, self.clock)
                 )
-            if "M1" in frames and not frames["M1"].empty:
+            entry_tf = self.strategy.entry_tf
+            if entry_tf in frames and not frames[entry_tf].empty:
                 self._update_market(sym, frames)
             sizes = ", ".join(f"{tf}:{len(df)}" for tf, df in frames.items())
             msg = f"Warm-up {sym} [{sizes}] in {time.perf_counter() - t0:.1f}s"
@@ -173,10 +198,10 @@ class LiveTrader:
         ks = self.guards.kill_switch
         acc = self.conn.account_info()
         if acc is not None:
-            equity = acc.equity
-            if self.dry_run:  # paper P/L on top of the real account equity
-                equity += sum(c.pnl for c in self.exec.paper.closed)
-                equity += sum(p.profit for p in self.exec.paper.positions.values())
+            if self.equity_provider is not None:  # shared account (several strategies)
+                equity = self.equity_provider(acc)
+            else:
+                equity = acc.equity + (self.paper_pnl() if self.dry_run else 0.0)
             ks.update_equity(equity, now)
             st.account = f"{acc.login} @ {acc.server}"
             st.currency, st.balance, st.equity = acc.currency, acc.balance, equity
@@ -190,10 +215,12 @@ class LiveTrader:
             )
             for trade in self.exec.flatten_all(now, ticks, "kill-switch"):
                 ks.record_close(trade.pnl, now, final=trade.final)
+                self._track_closed(trade, now)
             ks.flatten_done()
 
         for trade in self.exec.manage(now, ticks, self.market):
             ks.record_close(trade.pnl, now, final=trade.final)
+            self._track_closed(trade, now)
             kind = "CLOSED" if trade.final else "PARTIAL"
             st.event(f"{kind} #{trade.ticket} {trade.symbol} {trade.reason} P/L {trade.pnl:+.2f}",
                      "trade" if trade.pnl >= 0 else "warn")  # fmt: skip
@@ -232,8 +259,31 @@ class LiveTrader:
         return time.monotonic() - self._last_tick_change.get(sym, time.monotonic())
 
     # -------------------------------------------------------------- bars
+    def paper_pnl(self) -> float:
+        """Realised + floating P/L of the paper book (dry-run)."""
+        return sum(c.pnl for c in self.exec.paper.closed) + sum(
+            p.profit for p in self.exec.paper.positions.values()
+        )
+
+    def _track_closed(self, trade: Any, now: datetime) -> None:
+        """Accumulate partial exits per ticket; on the final exit feed health monitor + log."""
+        self._pnl_by_ticket[trade.ticket] = self._pnl_by_ticket.get(trade.ticket, 0.0) + trade.pnl
+        if not trade.final:
+            return
+        pnl = self._pnl_by_ticket.pop(trade.ticket)
+        risk = self._risk_by_ticket.pop(trade.ticket, 0.0)
+        r = pnl / risk if risk > 0 else 0.0
+        self.trade_log.append(self.tag or self.strategy.name, trade.symbol, trade.ticket, pnl, risk, r,
+                              trade.reason, now)  # fmt: skip
+        if risk > 0:
+            was_ok = self.health.allows_entries
+            self.health.record(r)
+            if was_ok and not self.health.allows_entries:
+                self.state.event(f"[{self.tag or self.strategy.name}] DISABLED by health monitor: "
+                                 f"{self.health.disabled_reason}", "error")  # fmt: skip
+
     def _update_market(self, sym: str, frames: dict[str, pd.DataFrame]) -> None:
-        m1 = frames["M1"]
+        m1 = frames[self.strategy.entry_tf]
         c = self.s.strategy
         atr1 = ind.atr(m1, c.atr_period)
         k = max(1, self.s.execution.trailing_candles)
@@ -242,7 +292,7 @@ class LiveTrader:
         self.market[sym] = MarketContext(
             a, float(m1["high"].tail(k).max()), float(m1["low"].tail(k).min()), mom
         )
-        ss = self.state.symbols[sym]
+        ss = self.state.symbols[self.key(sym)]
         ss.atr_m1, ss.momentum = a, mom
         if "M5" in frames and len(frames["M5"]) > c.atr_period:
             ss.atr_m5 = float(ind.atr(frames["M5"], c.atr_period).iloc[-1])
@@ -280,14 +330,15 @@ class LiveTrader:
         if lv:
             self.levels[sym] = KeyLevelMap(pd.Timestamp(row["time"]).to_pydatetime(), lv)
 
-        ss = st.symbols[sym]
+        ss = st.symbols[self.key(sym)]
         ss.bias = int(row.get("m15_bias", 0) or 0)
         ss.confirm = int(row.get("m5_confirm", 0) or 0)
         if signal is None:
             return
 
-        open_all = self.exec.open_positions()
-        pend_all = self.exec.pending_orders()
+        everyone = [self, *self.peers]  # account-wide limits across all running strategies
+        open_all = [p for t in everyone for p in t.exec.open_positions()]
+        pend_all = [o for t in everyone for o in t.exec.pending_orders()]
         ctx = EntryContext(
             symbol=sym, now=now, spread_points=tick.spread_points,
             atr_points=atr / spec.point if atr else None,
@@ -301,6 +352,22 @@ class LiveTrader:
         tag = f"{'BUY' if signal.is_buy else 'SELL'} {signal.order_type.upper()} {signal.entry}"
         if signal.key_level:
             tag += f" [{signal.key_level}]"
+        if not self.health.allows_entries:
+            decision.block("strategy disabled by health monitor")
+        if decision.allowed and self.meta is not None:
+            from src.lab.features import market_features
+
+            feat = (
+                market_features(frames[self.strategy.entry_tf], spec.point, self.clock)
+                .tail(1)
+                .copy()
+            )
+            feat["side"] = signal.side
+            prob = float(self.meta.predict_proba(feat)[0])
+            if prob < self.meta.threshold:
+                decision.block(f"ML filter P(win)={prob:.2f} < {self.meta.threshold:.2f}")
+            else:
+                tag += f" ML {prob:.2f}"
         if not decision.allowed:
             ss.last_signal = f"[dim]{tag} blocked[/]"
             st.event(f"{sym} signal {tag} BLOCKED: {decision}", "warn")
@@ -321,6 +388,7 @@ class LiveTrader:
         res = self.exec.execute_signal(signal, size.lots, tick, now)
         if res.ok:
             self.guards.kill_switch.record_entry()
+            self._risk_by_ticket[res.ticket] = size.risk_money
             ss.last_signal = f"{tag} @ {now:%H:%M}"
             st.event(f"{sym} {tag} {size.lots:.2f} lots SL {signal.stop_loss} TP {signal.take_profit or '-'} "
                      f"risk {size.risk_money:.2f} ({size.risk_pct_effective:.2f}%) | {signal.reason}",
@@ -338,7 +406,7 @@ class LiveTrader:
         st.consecutive_losses = ks.consecutive_losses
         st.avg_slippage = self.guards.slippage.average
         for sym, tick in ticks.items():
-            ss = st.symbols[sym]
+            ss = st.symbols[self.key(sym)]
             ss.bid, ss.ask, ss.spread = tick.bid, tick.ask, tick.spread_points
             ss.spread_median = self.guards.spread[sym].median
             gap_ok, gap_msg = self.guards.gaps[sym].check(now)
@@ -355,6 +423,11 @@ class LiveTrader:
             px = (tick.bid if p.side > 0 else tick.ask) if tick else p.entry
             rows.append(PositionRow(p.ticket, p.symbol, p.side, p.volume, p.entry, p.sl, p.tp,
                                     p.r_multiple(px), p.profit, p.be_done, p.tp1_done))  # fmt: skip
-        st.positions = rows
-        st.pending = [PendingRow(o.ticket, o.symbol, o.side, o.volume, o.price, o.sl, o.tp, o.expires)
+        st.positions_by[self.tag] = rows
+        st.positions = [r for v in st.positions_by.values() for r in v]
+        if self.health.enabled:
+            st.health_by[self.tag or self.strategy.name] = self.health.status()
+        st.pending_by[self.tag] = [PendingRow(o.ticket, o.symbol, o.side, o.volume, o.price, o.sl, o.tp, o.expires)
                       for o in self.exec.pending_orders()]  # fmt: skip
+
+        st.pending = [o for v in st.pending_by.values() for o in v]

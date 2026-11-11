@@ -18,6 +18,8 @@ python main.py --mode backtest --synthetic         # smoke backtest, no data nee
 python main.py --mode backtest --days 60 [--ticks] [--optimize] [--offline] [--compare]
 python main.py --mode backtest --days 365 --profile attivo --symbols XAUUSD EURUSD
 python main.py --mode download --days 180 [--ticks]
+python main.py --mode lab [--families orb tsmom] [--quick] [--symbols ...]   # strategy research lab
+python main.py --mode dryrun --profiles lab        # run every lab_* profile together (MultiTrader)
 python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 terminal only
 ```
 
@@ -51,6 +53,12 @@ python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 term
     `strategy`. Backtests run per symbol and are merged by `combine_results` (kill-switch per symbol there).
 12. **Profiles** in `config/profiles/*.yaml` are deep-merged over `settings.yaml` (`sessions.windows`
     is replaced, not merged). Never put credentials in profiles.
+
+13. **Lab honesty.** The holdout ("vault") must never influence selection; keep the journal check.
+    New strategy families go in `src/strategies/library.py` (single TF, `GRID`, `TIMEFRAMES`,
+    `EXEC`, `SESSIONS`) and must stay causal (`test_library_families_are_causal`). Candidate trades
+    are generated with per-symbol breakers off and replayed by `src/lab/portfolio.simulate_portfolio`.
+    `config/profiles/lab_*.yaml` and `models/` are generated: never edit or commit them.
 
 ## Conventions
 - Python ≥ 3.10, full type hints, dataclasses for config/models, `logging` (no `print` in `src/`

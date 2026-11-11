@@ -86,6 +86,9 @@ class BotState:
     symbols: dict[str, SymbolState] = field(default_factory=dict)
     positions: list[PositionRow] = field(default_factory=list)
     pending: list[PendingRow] = field(default_factory=list)
+    positions_by: dict[str, list[PositionRow]] = field(default_factory=dict)  # per strategy
+    pending_by: dict[str, list[PendingRow]] = field(default_factory=dict)
+    health_by: dict[str, str] = field(default_factory=dict)  # strategy -> health status
     events: deque[tuple[datetime, str, str]] = field(default_factory=lambda: deque(maxlen=200))
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

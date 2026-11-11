@@ -69,6 +69,30 @@ Rilevamento automatico del `filling_mode` (FOK / IOC / RETURN), **`order_check()
   `attivo` (trigger *pullback* di continuazione + breakout, finestra 08-21 CET, rischio 0,25% per trade).
   `--compare` li confronta sugli stessi dati.
 
+## Laboratorio di strategie (`--mode lab`)
+
+Un sistema che **genera, testa e scarta** strategie in automatico, progettato per difendersi
+dall'errore più comune della ricerca quantitativa: trovare strategie "fortunate".
+
+| Fase | Cosa fa |
+|---|---|
+| **Libreria** | 5 famiglie diverse: `trend_donchian`, `ema_cross`, `tsmom` (H1/H4), `orb` (rottura range apertura Londra/NY), `vwap_reversion` (M5/M15). Ognuna con griglia di parametri e gestione dell'uscita propria |
+| **Ricerca** | Ogni famiglia × timeframe × parametri × simbolo, valutata **in pool su tutti i simboli** (una regola, non un adattamento per simbolo) |
+| **Cassaforte** | Gli ultimi `holdout_months` (3) non vengono mai usati per scegliere: servono solo per la verifica finale, registrata nel journal |
+| **Walk-forward** | Ad ogni passo sceglie le migliori configurazioni con i soli dati passati e le prova sui 3 mesi successivi: misura onestamente il *processo di selezione* |
+| **Filtri anti-caso** | Trade minimi, expectancy positiva, **Deflated Sharpe Ratio** (più configurazioni provi, più alta l'asticella), robustezza dei parametri vicini, **stress test** costi (spread ×1.5, slippage ×2) |
+| **Meta-labeling (ML)** | Per le sopravvissute, un modello `HistGradientBoosting` impara *quali segnali prendere* (contesto di mercato), validato con walk-forward purgato. Adottato solo se migliora l'expectancy fuori campione |
+| **Portafoglio a conto unico** | Simulazione con equity condivisa, rischio composto, kill-switch e posizioni massime **globali** |
+| **Promozione** | Solo chi supera tutto, cassaforte inclusa, diventa un profilo `config/profiles/lab_*.yaml` |
+| **Live** | `--profiles lab` fa girare tutte le strategie promosse **insieme** (MultiTrader) con kill-switch condiviso, filtro ML e **monitor di salute** che spegne una strategia se i risultati reali divergono dal backtest. I trade chiusi finiscono in `logs/live_trades.csv` |
+| **Imparare** | Rilanciare il laboratorio periodicamente (es. ogni mese): i dati nuovi rientrano nella ricerca e nei modelli |
+
+```bash
+python main.py --mode lab                          # tutte le famiglie, tutti i simboli abilitati
+python main.py --mode lab --families orb tsmom --quick
+python main.py --mode dryrun --profiles lab        # strategie promosse, in paper trading
+```
+
 ## Dati storici & backtest anti-illusione
 
 | Modulo | Cosa fa |

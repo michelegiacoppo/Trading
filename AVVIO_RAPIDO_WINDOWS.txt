@@ -21,6 +21,8 @@ POI, IN ORDINE (doppio clic):
  3b_CONFRONTA_PROFILI.bat  confronta profilo base e profilo attivo (piu' trade) sugli stessi dati
  3c_DIAGNOSI_COSTI.bat     stessi profili a costi ZERO: capisce se i segnali hanno valore prima dei costi
  4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
+ 6_LABORATORIO.bat   cerca automaticamente strategie robuste (walk-forward, anti-caso, ML, cassaforte)
+ 7_LAB_DRYRUN.bat    fa girare insieme in dry-run le strategie promosse dal laboratorio
  5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
 
 PROFILI
@@ -32,6 +34,12 @@ SIMBOLI
  Di base il bot lavora su: XAUUSD XAGUSD EURUSD GBPUSD USDJPY AUDUSD USDCAD EURJPY GBPJPY US100
  Per cambiarli: config\settings.yaml -> symbols -> enabled: true/false
  Nei .bat puoi anche scrivere solo alcuni simboli, es: XAUUSD EURUSD
+
+LABORATORIO (consigliato rilanciarlo una volta al mese: impara dai dati nuovi)
+ - Promuove una strategia solo se supera TUTTI i test, inclusa la cassaforte finale
+ - Le strategie promosse diventano profili config\profiles\lab_*.yaml
+ - Il monitor di salute spegne da solo una strategia che in live si discosta dal backtest
+ - Se non promuove niente, e' un risultato onesto: meglio di perdere soldi
 
 COME LEGGERE IL REPORT
  - Spread source deve essere verde ("real")
