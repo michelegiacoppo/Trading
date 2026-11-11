@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +37,7 @@ from src.config import Settings, SymbolSpec, resolve_path
 from src.core.clock import ServerClock
 from src.core.data_feed import TF_MINUTES
 from src.core.execution import MarketContext, PositionView, TradeManager
+from src.core.news import get_calendar
 from src.risk.guardrails import DailyKillSwitch, GapDetector, SessionFilter, SpreadFilter
 from src.risk.position_sizer import PositionSizer, money_per_lot
 from src.strategies import indicators as ind
@@ -214,7 +215,17 @@ class BacktestEngine:
             m1["spread"] = m1["spread"] * bt.spread_mult
             spread_source += f" x{bt.spread_mult:g} (stress)"
 
+        self.strategy.symbol = self.symbol
+        self.strategy.calendar = get_calendar(self.s.news)
         feats = self.strategy.compute_features(self.build_frames(m1, base_tf))
+        calendar = self.strategy.calendar if self.s.news.apply_in_backtest else None
+
+        def news_check(when: datetime) -> tuple[bool, str]:
+            if calendar is None:
+                return True, "ok"
+            chk = calendar.blackout(self.symbol, when, self.s.news)
+            return (not chk.blocked), chk.reason
+
         n = len(feats)
         t = pd.to_datetime(feats["time"]).reset_index(drop=True)
         o, h, lo_, c = (feats[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))
@@ -375,6 +386,7 @@ class BacktestEngine:
                 else:
                     for label, check in (
                         ("session", session.check(now)),
+                        ("news", news_check(now)),
                         ("kill-switch/cooldown", ks.check(now)),
                         ("spread", spread_f.check(spread_pts[i], atr_pts)),
                         ("gap block", gaps.check(now)),

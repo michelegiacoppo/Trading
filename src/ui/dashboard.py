@@ -101,6 +101,7 @@ def _micro_table(s: SymbolState) -> Table:
     tb.add_row("Momentum", f"{s.momentum:+.2f} xATR")
     guard = "[green]READY[/]" if s.guard == "OK" else f"[yellow]{s.guard}[/]"
     tb.add_row("Entry guard", guard)
+    tb.add_row("Next news", s.next_news)
     tb.add_row("Last signal", s.last_signal)
     return tb
 
@@ -123,7 +124,8 @@ def render_market_compact(st: BotState) -> Panel:
     tb = Table(box=box.SIMPLE_HEAVY, expand=True)
     for col, just in (("Symbol", "left"), ("Bid", "right"), ("Ask", "right"), ("Spread", "right"),
                       ("ATR M1", "right"), ("M15", "center"), ("Mom", "right"), ("Vol", "left"),
-                      ("Gap", "left"), ("Guard", "left"), ("Last signal", "left")):  # fmt: skip
+                      ("Gap", "left"), ("Guard", "left"), ("Next news", "left"),
+                      ("Last signal", "left")):  # fmt: skip
         tb.add_column(col, justify=just, no_wrap=col not in ("Guard", "Last signal"))
     for s in st.symbols.values():
         d = s.digits
@@ -133,7 +135,7 @@ def render_market_compact(st: BotState) -> Panel:
         tb.add_row(f"[bold]{s.symbol}[/]", f"{s.bid:.{d}f}", f"{s.ask:.{d}f}",
                    f"{light} {s.spread:.0f}/{s.max_spread:.0f}", f"{s.atr_m1:.{d}f}",
                    _ARROW.get(s.bias, "-"), f"{s.momentum:+.1f}", s.vol_state, gap, guard,
-                   s.last_signal)  # fmt: skip
+                   s.next_news, s.last_signal)  # fmt: skip
     return Panel(
         tb, title=f"[bold]Market Microstructure ({len(st.symbols)} symbols)", border_style="gold1"
     )

@@ -47,6 +47,8 @@ class SingleTFStrategy(BaseStrategy):
     TIMEFRAMES: ClassVar[list[str]] = ["H1"]
     EXEC: ClassVar[dict[str, Any]] = TREND_EXEC
     SESSIONS: ClassVar[dict[str, Any]] = ALL_DAY
+    NEWS: ClassVar[dict[str, Any]] = {}  # news-blackout overrides for this family
+    REQUIRES_CALENDAR: ClassVar[bool] = False
 
     def __init__(self, cfg: StrategyConfig, levels_cfg: LevelsConfig | None = None,
                  clock: ServerClock | None = None) -> None:  # fmt: skip
@@ -226,7 +228,54 @@ class VwapReversion(SingleTFStrategy):
         return pd.Series(long_, index=df.index), pd.Series(short, index=df.index)
 
 
+class NewsDrift(SingleTFStrategy):
+    """Post-release continuation: after a high-impact release of one of the symbol's currencies,
+    wait ``delay_minutes`` (spread normalises, first spike fades) and follow the move if it is
+    large enough - optionally only when it agrees with the data surprise (actual vs forecast).
+    Needs the economic calendar (mql5/XQS_ExportCalendar.mq5)."""
+
+    name = "news_drift"
+    DEFAULTS: ClassVar[dict[str, Any]] = {"delay_minutes": 10, "move_atr": 1.0, "use_surprise": True,
+                                          "min_surprise": 0.5, "sl_atr": 1.5, "tp_r": 2.0}  # fmt: skip
+    GRID: ClassVar[dict[str, list[Any]]] = {"delay_minutes": [5, 15], "move_atr": [0.5, 1.0],
+                                            "use_surprise": [True, False]}  # fmt: skip
+    TIMEFRAMES: ClassVar[list[str]] = ["M5"]
+    EXEC: ClassVar[dict[str, Any]] = {**INTRADAY_EXEC, "max_trade_duration_minutes": 120}
+    NEWS: ClassVar[dict[str, Any]] = {"blackout_minutes_before": 10, "blackout_minutes_after": 0}
+    REQUIRES_CALENDAR: ClassVar[bool] = True
+
+    def signals(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        none = pd.Series(False, index=df.index)
+        if self.calendar is None or not self.symbol:
+            return none, none
+        ev = self.calendar.events_for(self.symbol, 3)
+        if ev.empty or len(df) < 2:
+            return none, none
+        tf = pd.Timedelta(df["time"].diff().median())
+        close_t = (df["time"] + tf).to_numpy(dtype="datetime64[ns]")
+        et = ev["time"].to_numpy(dtype="datetime64[ns]")
+        k = np.searchsorted(et, close_t, side="right") - 1  # last release before the bar close
+        has = k >= 0
+        kk = np.clip(k, 0, None)
+        since = np.full(len(df), np.inf)
+        since[has] = (close_t[has] - et[k[has]]) / np.timedelta64(1, "m")
+        delay = float(self.p["delay_minutes"])
+        first = (since >= delay) & (since < delay + tf / pd.Timedelta(minutes=1))
+        # open of the bar in which the release happened = price just before the news
+        bar_open_t = df["time"].to_numpy(dtype="datetime64[ns]")
+        rel_bar = np.clip(np.searchsorted(bar_open_t, et[kk], side="right") - 1, 0, None)
+        move = df["close"].to_numpy() - df["open"].to_numpy()[rel_bar]
+        big = np.abs(move) >= float(self.p["move_atr"]) * df["atr"].to_numpy()
+        long_, short = first & big & (move > 0), first & big & (move < 0)
+        if self.p["use_surprise"]:
+            sz = np.nan_to_num((ev["surprise_z"] * ev["symbol_sign"]).to_numpy()[kk])
+            strong = np.abs(sz) >= float(self.p["min_surprise"])
+            long_ &= strong & (sz > 0)
+            short &= strong & (sz < 0)
+        return pd.Series(long_, index=df.index), pd.Series(short, index=df.index)
+
+
 LIBRARY: dict[str, type[SingleTFStrategy]] = {
     cls.name: cls
-    for cls in (TrendDonchian, EmaCross, TSMomentum, OpeningRangeBreakout, VwapReversion)
+    for cls in (TrendDonchian, EmaCross, TSMomentum, OpeningRangeBreakout, VwapReversion, NewsDrift)
 }

@@ -78,6 +78,9 @@ def test_library_families_are_causal(family: str) -> None:
     s.strategy.params = dict(cls.DEFAULTS)
     strat = create_strategy(s.strategy, s.levels, UTC)
     bars = ind.resample_ohlc(synthetic_m1(120_000, seed=4), tf)
+    strat.symbol = "XAUUSD"
+    if cls.REQUIRES_CALENDAR:
+        strat.calendar = synthetic_calendar(bars["time"].iloc[0], bars["time"].iloc[-1])
     full = strat.compute_features({tf: bars}).set_index("time")
     cut = int(len(bars) * 0.7)
     part = strat.compute_features({tf: bars.iloc[:cut]}).set_index("time")
@@ -187,3 +190,93 @@ def test_health_monitor_disables_on_divergence(tmp_path) -> None:  # noqa: ANN00
     log = LiveTradeLog(tmp_path / "t.csv")
     log.append("p", "XAUUSD", 1, 10.0, 20.0, 0.5, "TP", datetime(2026, 11, 11, 10))
     assert (tmp_path / "t.csv").read_text().count("\n") == 2
+
+
+# --------------------------------------------------------------- news
+def synthetic_calendar(start: pd.Timestamp, end: pd.Timestamp):  # noqa: ANN201
+    from src.core.news import EconomicCalendar
+
+    rng = np.random.default_rng(5)
+    days = pd.date_range(start.normalize(), end, freq="B")
+    times = [d + pd.Timedelta(hours=14, minutes=30) for d in days]
+    n = len(times)
+    fc = rng.normal(0, 1, n)
+    return EconomicCalendar(pd.DataFrame({
+        "time": times, "currency": "USD", "event": "Synthetic CPI", "importance": 3,
+        "actual": fc + rng.normal(0, 0.5, n), "forecast": fc, "previous": fc,
+    }))  # fmt: skip
+
+
+def test_symbol_currencies() -> None:
+    from src.core.news import symbol_currencies
+
+    assert symbol_currencies("EURUSD.m") == ("EUR", "USD")
+    assert symbol_currencies("XAUUSD") == (None, "USD")
+    assert symbol_currencies("GOLD") == (None, "USD")
+    assert symbol_currencies("GER40") == (None, "EUR")
+    assert symbol_currencies("USDJPY-ECN") == ("USD", "JPY")
+
+
+def test_news_blackout_and_features(tmp_path) -> None:  # noqa: ANN001
+    from datetime import datetime
+
+    from src.config import NewsConfig
+    from src.core.news import EconomicCalendar
+
+    tsv = tmp_path / "cal.csv"
+    tsv.write_text(
+        "time\tcurrency\tevent\timportance\tactual\tforecast\tprevious\timpact\n"
+        "2026.11.10 15:30\tUSD\tCPI m/m\t3\t0.5\t0.3\t0.2\t1\n"
+        "2026.11.10 10:00\tEUR\tZEW, Sentiment\t2\t10\t12\t8\t2\n"
+        "2026.11.11 15:30\tUSD\tCPI m/m\t3\t0.1\t0.3\t0.5\t2\n",
+        encoding="utf-8",
+    )
+    cal = EconomicCalendar.load(tsv)
+    cfg = NewsConfig(blackout_minutes_before=10, blackout_minutes_after=15)
+    assert cal.blackout("XAUUSD", datetime(2026, 11, 10, 15, 25), cfg).blocked
+    assert cal.blackout("EURUSD", datetime(2026, 11, 10, 15, 40), cfg).blocked
+    assert not cal.blackout("XAUUSD", datetime(2026, 11, 10, 15, 50), cfg).blocked
+    assert not cal.blackout("EURUSD", datetime(2026, 11, 10, 10, 0), cfg).blocked  # medium impact
+    assert not cal.blackout("USDJPY", datetime(2026, 11, 10, 3, 0), cfg).blocked
+    f = cal.features_for(
+        "XAUUSD", pd.Series(pd.to_datetime(["2026-11-11 16:00", "2026-11-11 15:00"]))
+    )
+    assert f["news_min_since"].iloc[0] == pytest.approx(30)
+    assert f["news_min_to"].iloc[1] == pytest.approx(30)
+    # second CPI missed the forecast: bad for USD -> positive (bullish) for XAUUSD
+    assert f["news_surprise"].iloc[0] > 0
+
+
+def test_news_drift_trades_after_releases() -> None:
+    from src.backtest.engine import BacktestEngine, synthetic_m1
+    from src.lab.portfolio import candidate_settings
+
+    cls = LIBRARY["news_drift"]
+    s = candidate_settings(load_settings())
+    s.strategy.name = "news_drift"
+    s.strategy.timeframes = {"entry": "M5", "confirm": "M5", "trend": "M5"}
+    s.strategy.params = {**cls.DEFAULTS, "use_surprise": False, "move_atr": 0.3}
+    s.sessions.windows = {}
+    s.news.enabled = False  # calendar injected directly below
+    for k, v in cls.NEWS.items():
+        setattr(s.news, k, v)
+    for k, v in cls.exec_overrides(s.strategy.params).items():
+        setattr(s.execution, k, v)
+    bars = ind.resample_ohlc(synthetic_m1(60_000, seed=8), "M5")
+    strat = create_strategy(s.strategy, s.levels, UTC)
+    eng = BacktestEngine(s, strat, "XAUUSD", clock=UTC)
+    cal = synthetic_calendar(bars["time"].iloc[0], bars["time"].iloc[-1])
+    import src.backtest.engine as engine_mod
+
+    orig = engine_mod.get_calendar
+    engine_mod.get_calendar = lambda cfg: cal
+    try:
+        res = eng.run(bars, base_tf="M5")
+    finally:
+        engine_mod.get_calendar = orig
+    assert res.stats["trades"] > 0
+    for t in res.trades:  # every entry happens shortly after a 14:30 release
+        mins = (
+            pd.Timestamp(t.signal_time) - pd.Timestamp(t.signal_time).normalize()
+        ).total_seconds() / 60
+        assert 14 * 60 + 30 + 10 <= mins <= 14 * 60 + 30 + 15

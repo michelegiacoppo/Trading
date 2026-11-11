@@ -23,6 +23,7 @@ POI, IN ORDINE (doppio clic):
  4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
  6_LABORATORIO.bat   cerca automaticamente strategie robuste (walk-forward, anti-caso, ML, cassaforte)
  7_LAB_DRYRUN.bat    fa girare insieme in dry-run le strategie promosse dal laboratorio
+ 8_CALENDARIO_NOTIZIE.bat  installa l'export del calendario economico di MT5 (consigliato prima del laboratorio)
  5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
 
 PROFILI
@@ -34,6 +35,11 @@ SIMBOLI
  Di base il bot lavora su: XAUUSD XAGUSD EURUSD GBPUSD USDJPY AUDUSD USDCAD EURJPY GBPJPY US100
  Per cambiarli: config\settings.yaml -> symbols -> enabled: true/false
  Nei .bat puoi anche scrivere solo alcuni simboli, es: XAUUSD EURUSD
+
+NOTIZIE
+ Con il calendario attivo il bot: blocca i nuovi ingressi 10 min prima / 15 dopo le notizie
+ ad alto impatto della valuta coinvolta (anche nei backtest), le usa come informazioni nel
+ machine learning e il laboratorio testa la strategia news_drift.
 
 LABORATORIO (consigliato rilanciarlo una volta al mese: impara dai dati nuovi)
  - Promuove una strategia solo se supera TUTTI i test, inclusa la cassaforte finale

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -56,6 +56,8 @@ class BaseStrategy(ABC):
     ) -> None:
         self.cfg = cfg
         self.levels_cfg = levels_cfg or LevelsConfig(enabled=False)
+        self.symbol: str | None = None  # set by the engine / live trader before compute_features
+        self.calendar: Any = None  # src.core.news.EconomicCalendar (set by engine / trader)
         self.clock = clock or ServerClock()
 
     @property

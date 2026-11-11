@@ -6,6 +6,8 @@ score a new signal), so the model always sees identically computed inputs.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -15,11 +17,16 @@ from src.strategies import indicators as ind
 FEATURES = [
     "side", "mom_1", "mom_3", "mom_12", "atr_ratio", "dist_ema50", "dist_ema200", "rsi14",
     "range_pos20", "vol_ratio", "spread_atr", "dist_vwap", "hour_sin", "hour_cos", "dow",
+    "news_min_since", "news_min_to", "news_surprise",
 ]  # fmt: skip
 
 
 def market_features(
-    bars: pd.DataFrame, point: float, clock: ServerClock | None = None
+    bars: pd.DataFrame,
+    point: float,
+    clock: ServerClock | None = None,
+    symbol: str | None = None,
+    calendar: Any = None,
 ) -> pd.DataFrame:
     """Feature table aligned 1:1 with ``bars`` (without the trade ``side`` column)."""
     clock = clock or ServerClock()
@@ -52,6 +59,14 @@ def market_features(
     f["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     f["hour_cos"] = np.cos(2 * np.pi * hour / 24)
     f["dow"] = utc.dt.dayofweek.astype(float)
+    # economic calendar context (NaN when no calendar: the model handles missing values)
+    if calendar is not None and symbol:
+        tf_close = df["time"] + (df["time"].diff().median() if len(df) > 1 else pd.Timedelta(0))
+        news = calendar.features_for(symbol, tf_close)
+        for col in ("news_min_since", "news_min_to", "news_surprise"):
+            f[col] = news[col].to_numpy()
+    else:
+        f["news_min_since"] = f["news_min_to"] = f["news_surprise"] = np.nan
     return f.replace([np.inf, -np.inf], np.nan)
 
 

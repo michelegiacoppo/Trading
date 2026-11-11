@@ -27,6 +27,7 @@ class SymbolState:
     guard: str = "-"
     last_signal: str = "-"
     key_levels: list[tuple[str, float, float]] = field(default_factory=list)  # label, level, dist
+    next_news: str = "-"
 
 
 @dataclass

@@ -224,7 +224,14 @@ class LevelsConfig:
 @dataclass
 class LabConfig:
     families: list[str] = field(
-        default_factory=lambda: ["trend_donchian", "ema_cross", "tsmom", "orb", "vwap_reversion"]
+        default_factory=lambda: [
+            "trend_donchian",
+            "ema_cross",
+            "tsmom",
+            "orb",
+            "vwap_reversion",
+            "news_drift",
+        ]
     )
     history_days: dict[str, int] = field(
         default_factory=lambda: {"M5": 365, "M15": 730, "H1": 2190, "H4": 3650}
@@ -246,6 +253,20 @@ class LabConfig:
     meta_min_trades: int = 200
     meta_min_keep: float = 0.4
     models_dir: str = "models"
+
+
+@dataclass
+class NewsConfig:
+    """Economic calendar exported from MT5 (mql5/XQS_ExportCalendar.mq5)."""
+
+    enabled: bool = True
+    calendar_file: str = (
+        "auto"  # auto = <APPDATA>/MetaQuotes/Terminal/Common/Files/xqs_calendar.csv
+    )
+    blackout_importance: int = 3  # 3 = high impact only, 2 = also medium
+    blackout_minutes_before: int = 10
+    blackout_minutes_after: int = 15
+    apply_in_backtest: bool = True
 
 
 @dataclass
@@ -293,6 +314,7 @@ class Settings:
     data: DataConfig = field(default_factory=DataConfig)
     levels: LevelsConfig = field(default_factory=LevelsConfig)
     lab: LabConfig = field(default_factory=LabConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     health: HealthConfig = field(default_factory=HealthConfig)
 
     @property
@@ -350,6 +372,7 @@ class Settings:
             data=_build(DataConfig, raw.get("data")),
             levels=_build(LevelsConfig, raw.get("levels")),
             lab=_build(LabConfig, raw.get("lab")),
+            news=_build(NewsConfig, raw.get("news")),
             health=_build(HealthConfig, raw.get("health")),
         )
 

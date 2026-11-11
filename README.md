@@ -93,6 +93,22 @@ python main.py --mode lab --families orb tsmom --quick
 python main.py --mode dryrun --profiles lab        # strategie promosse, in paper trading
 ```
 
+## Notizie: calendario economico di MT5
+
+Il pacchetto Python di MT5 non legge il calendario economico, quindi lo script
+`mql5/XQS_ExportCalendar.mq5` (installabile con `8_CALENDARIO_NOTIZIE.bat`) lo esporta, con dato
+reale, previsione, precedente e importanza, nella cartella *Common\Files* del terminale e lo
+aggiorna ogni 15 minuti. Il bot lo usa in tre modi:
+
+| Uso | Dettaglio |
+|---|---|
+| **Protezione** | Nessun nuovo ingresso 10 min prima / 15 dopo le notizie ad alto impatto **delle valute del simbolo** (XAUUSD → USD, EURUSD → EUR+USD, GER40 → EUR…), sia in live sia nei backtest |
+| **Informazioni per il ML** | Minuti dall'ultima e alla prossima notizia, sorpresa standardizzata (reale − previsione) orientata sul simbolo: feature del meta-labeling |
+| **Strategia `news_drift`** | Dopo una notizia forte attende 5-15 minuti (spread normalizzato) e segue il movimento, eventualmente solo se concorde con la sorpresa. Testata dal laboratorio come le altre |
+
+Entrare nell'istante dell'uscita del dato non è supportato di proposito: latenza e spread rendono
+quel momento sfavorevole per un conto retail.
+
 ## Dati storici & backtest anti-illusione
 
 | Modulo | Cosa fa |

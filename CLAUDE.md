@@ -60,6 +60,11 @@ python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 term
     are generated with per-symbol breakers off and replayed by `src/lab/portfolio.simulate_portfolio`.
     `config/profiles/lab_*.yaml` and `models/` are generated: never edit or commit them.
 
+14. **News.** The economic calendar comes only from the MT5 export (`mql5/XQS_ExportCalendar.mq5` →
+    `src/core/news.py`, server time). Blackouts go through `Guardrails` (live) and the engine's
+    `news_check` (backtest) so both behave the same. Strategies get `self.symbol` / `self.calendar`
+    set by the engine/trader before `compute_features`.
+
 ## Conventions
 - Python ≥ 3.10, full type hints, dataclasses for config/models, `logging` (no `print` in `src/`
   except Rich output in diagnostics/report).

@@ -360,7 +360,7 @@ levels:
 # Cerca strategie su tutte le famiglie, simboli e timeframe, con filtri anti-caso.
 # -----------------------------------------------------------------------------
 lab:
-  families: [trend_donchian, ema_cross, tsmom, orb, vwap_reversion]
+  families: [trend_donchian, ema_cross, tsmom, orb, vwap_reversion, news_drift]  # news_drift richiede il calendario
   history_days: {M5: 365, M15: 730, H1: 2190, H4: 3650}   # storico scaricato per timeframe
   holdout_months: 3              # CASSAFORTE: ultimi 3 mesi mai usati per scegliere, solo verifica finale
   wf_test_months: 3              # walk-forward: finestre di verifica da 3 mesi...
@@ -379,6 +379,18 @@ lab:
   meta_min_trades: 200           # trade minimi per allenare il filtro ML
   meta_min_keep: 0.4             # il filtro deve tenere almeno il 40% dei segnali
   models_dir: models             # dove vengono salvati i modelli ML
+
+# -----------------------------------------------------------------------------
+# Notizie: calendario economico di MT5 esportato da mql5/XQS_ExportCalendar.mq5
+# (installalo con 8_CALENDARIO_NOTIZIE.bat). Orari = ora server del broker.
+# -----------------------------------------------------------------------------
+news:
+  enabled: true
+  calendar_file: auto            # auto = cartella Common\Files di MT5, oppure un percorso
+  blackout_importance: 3         # 3 = solo notizie ad ALTO impatto, 2 = anche medio
+  blackout_minutes_before: 10    # niente nuovi ingressi 10 min prima della notizia...
+  blackout_minutes_after: 15     # ...e 15 min dopo (spread e slippage esplodono)
+  apply_in_backtest: true        # applica lo stesso blocco nei backtest (risultati onesti)
 
 # Monitor di salute (compilato dal laboratorio nei profili lab_*): spegne una strategia
 # live se i risultati reali si allontanano troppo da quelli attesi dal backtest.

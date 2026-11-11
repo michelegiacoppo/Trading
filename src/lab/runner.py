@@ -41,6 +41,7 @@ from src.backtest.engine import BacktestEngine, BTTrade
 from src.config import PROFILES_DIR, Settings, SymbolSpec, resolve_path
 from src.core.clock import ServerClock
 from src.core.data_feed import TF_MINUTES
+from src.core.news import get_calendar
 from src.lab.features import FEATURES, features_at, market_features
 from src.lab.meta import MetaReport, train_meta
 from src.lab.portfolio import (
@@ -100,7 +101,10 @@ class Lab:
         self.data = data
         self.clock = clock
         self.con = console or Console()
-        self.families = [f for f in (families or self.cfg.families) if f in LIBRARY]
+        self.calendar = get_calendar(settings.news)
+        wanted = [f for f in (families or self.cfg.families) if f in LIBRARY]
+        self.skipped = [f for f in wanted if LIBRARY[f].REQUIRES_CALENDAR and self.calendar is None]
+        self.families = [f for f in wanted if f not in self.skipped]
         self.quick = quick
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.out_dir = resolve_path(settings.general.log_dir) / "lab" / self.run_id
@@ -136,6 +140,8 @@ class Lab:
             setattr(s.execution, k, v)
         for k, v in cls.SESSIONS.items():
             setattr(s.sessions, k, copy.deepcopy(v))
+        for k, v in cls.NEWS.items():
+            setattr(s.news, k, v)
         s.backtest.initial_equity = self.cfg.candidate_equity
         s.risk.risk_per_trade_pct = REF_RISK
         s.levels.enabled = False
@@ -193,7 +199,7 @@ class Lab:
             if key not in self._feat_cache:
                 bars, spec = self.data[sym][tf]
                 point = spec.point if spec else self.s.symbols[sym].backtest_spec().point
-                self._feat_cache[key] = market_features(bars, point, self.clock)
+                self._feat_cache[key] = market_features(bars, point, self.clock, sym, self.calendar)
             f = features_at(
                 self._feat_cache[key], pd.Series([t.signal_time for t in ts]), TF_MINUTES[tf]
             )
@@ -210,6 +216,12 @@ class Lab:
     def run(self) -> dict[str, Any]:
         cands = self.enumerate()
         n_runs = sum(sum(1 for tfs in self.data.values() if c.tf in tfs) for c in cands)
+        if self.skipped:
+            self.con.print(f"[yellow]Skipped (no economic calendar): {', '.join(self.skipped)} - "
+                           "install it with 8_CALENDARIO_NOTIZIE.bat[/]")  # fmt: skip
+        elif self.calendar is not None:
+            self.con.print(f"Economic calendar: {len(self.calendar.events):,} events up to "
+                           f"{self.calendar.last_time:%Y-%m-%d} (news blackout, ML features, news_drift)")  # fmt: skip
         self.con.print(f"[bold]Lab[/] {self.run_id}: {len(cands)} configurations x symbols = {n_runs} backtests. "
                        f"Vault (holdout) from [bold]{self.holdout_start:%Y-%m-%d}[/] — never used for selection.")  # fmt: skip
         with Progress(console=self.con, transient=True) as prog:
@@ -378,6 +390,7 @@ class Lab:
                              "meta_threshold": c.meta.threshold if c.meta and c.meta.adopted else 0.5},
                 "execution": cls.exec_overrides(c.params),
                 "sessions": copy.deepcopy(cls.SESSIONS),
+                "news": dict(cls.NEWS),
                 "risk": {"risk_per_trade_pct": self.cfg.risk_per_trade_pct},
                 "levels": {"enabled": False},
                 "health": {"enabled": True, "expected_mean_r": round(c.metrics["mean_r"], 4),

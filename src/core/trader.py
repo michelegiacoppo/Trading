@@ -37,6 +37,7 @@ from src.core.execution import ExecutionEngine, MarketContext
 from src.core.health import LiveTradeLog, StrategyHealth
 from src.core.levels import KeyLevelMap, compute_levels
 from src.core.mt5_connector import MT5Connector
+from src.core.news import get_calendar
 from src.core.state import BotState, PendingRow, PositionRow, SymbolState
 from src.lab.meta import MetaModel
 from src.risk.guardrails import EntryContext, Guardrails
@@ -67,7 +68,8 @@ class LiveTrader:
         self.store = HistoricalStore(resolve_path(settings.data.historical_dir), connector,
                                      settings.data.download_chunk_days)  # fmt: skip
         self.guards = Guardrails(settings.symbols, settings.guardrails, settings.risk,
-                                 settings.sessions, self.clock)  # fmt: skip
+                                 settings.sessions, self.clock,
+                                 get_calendar(settings.news), settings.news)  # fmt: skip
         self.sizer = PositionSizer(settings.risk)
         self.exec = ExecutionEngine(connector, self.feed, settings, self.guards, dry_run=dry_run)
         self.market: dict[str, MarketContext] = {}
@@ -317,6 +319,9 @@ class LiveTrader:
             return
         self._update_market(sym, frames)
         spread_price = tick.ask - tick.bid
+        self.guards.calendar = get_calendar(self.s.news)  # picks up the refreshed export file
+        self.strategy.symbol = sym
+        self.strategy.calendar = self.guards.calendar
         signal, row = self.strategy.latest_signal(frames, sym_cfg, spec, spread_price)
         if row is None:
             return
@@ -358,7 +363,13 @@ class LiveTrader:
             from src.lab.features import market_features
 
             feat = (
-                market_features(frames[self.strategy.entry_tf], spec.point, self.clock)
+                market_features(
+                    frames[self.strategy.entry_tf],
+                    spec.point,
+                    self.clock,
+                    sym,
+                    self.guards.calendar,
+                )
                 .tail(1)
                 .copy()
             )
@@ -415,6 +426,14 @@ class LiveTrader:
             spec = self.feed.symbol_spec(sym)
             ss.guard = str(self.guards.check_entry(EntryContext(
                 sym, now, tick.spread_points, atr / spec.point if atr else None, self._tick_age(sym))))  # fmt: skip
+            cal = self.guards.calendar
+            if cal is not None:
+                nxt = cal.next_events(sym, now, 1, min_importance=3)
+                if len(nxt):
+                    e = nxt.iloc[0]
+                    mins = (e["time"] - pd.Timestamp(now)).total_seconds() / 60
+                    when = f"{mins:.0f}m" if mins < 120 else f"{e['time']:%a %H:%M}"
+                    ss.next_news = f"{e['currency']} {str(e['event'])[:18]} ({when})"
             if sym in self.levels:
                 ss.key_levels = self.levels[sym].nearest(tick.bid, 4)
         rows = []

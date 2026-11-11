@@ -20,6 +20,7 @@ import statistics
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from typing import Any
 
 from src.config import GuardrailConfig, RiskConfig, SessionConfig, SymbolConfig
 from src.core.clock import ServerClock
@@ -335,8 +336,12 @@ class Guardrails:
         risk_cfg: RiskConfig,
         session_cfg: SessionConfig,
         clock: ServerClock | None = None,
+        calendar: Any = None,
+        news_cfg: Any = None,
     ) -> None:
         self.guard_cfg = guard_cfg
+        self.calendar = calendar  # src.core.news.EconomicCalendar | None
+        self.news_cfg = news_cfg
         self.risk_cfg = risk_cfg
         self.spread = {s: SpreadFilter(c, guard_cfg) for s, c in symbols.items()}
         self.gaps = {s: GapDetector(guard_cfg) for s in symbols}
@@ -356,6 +361,10 @@ class Guardrails:
         for ok, reason in checks:
             if not ok:
                 d.block(reason)
+        if self.calendar is not None and self.news_cfg is not None:
+            news = self.calendar.blackout(ctx.symbol, ctx.now, self.news_cfg)
+            if news.blocked:
+                d.block(news.reason)
         if ctx.last_tick_age_s > self.guard_cfg.stale_tick_s:
             d.block(f"stale feed ({ctx.last_tick_age_s:.0f}s)")
         if ctx.open_positions_total >= self.risk_cfg.max_open_positions:
