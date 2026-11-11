@@ -93,6 +93,19 @@ python main.py --mode lab --families orb tsmom --quick
 python main.py --mode dryrun --profiles lab        # strategie promosse, in paper trading
 ```
 
+## Price action: la "mente del trader"
+
+- **`price_action`** (famiglia del laboratorio, M15/H1/H4) ragiona come un trader discrezionale:
+  pattern a candele (pin bar, engulfing, morning/evening star, tweezer, inside bar, tre soldati,
+  marubozu) **+ posizione** su supporti/resistenze costruiti dai massimi e minimi passati (più tocchi,
+  zona più forte; ruolo invertito incluso) **+ contesto** (trend EMA200/EMA50, struttura HH/HL,
+  volumi) **+ conferma** opzionale **+ spazio**: target sulla zona opposta, ingresso solo se R:R ≥ minimo.
+  Ogni fattore aggiunge punti a un **punteggio di confluenza** e ogni trade ha una spiegazione
+  scritta (es. *"Engulfing rialzista su supporto 2650 (3 tocchi), trend a favore, R:R 2.4"*).
+- **Studio** (`--mode study`, `9_STUDIO_PRICE_ACTION.bat`): misura sui tuoi dati, per ogni pattern ×
+  posizione × trend × conferma, il risultato reale in R di un trade standard (stop oltre il pattern,
+  target 2R, spread incluso), confrontato con una candela qualsiasi e diviso tra primo e ultimo periodo.
+
 ## Notizie: calendario economico di MT5
 
 Il pacchetto Python di MT5 non legge il calendario economico, quindi lo script

@@ -280,3 +280,84 @@ def test_news_drift_trades_after_releases() -> None:
             pd.Timestamp(t.signal_time) - pd.Timestamp(t.signal_time).normalize()
         ).total_seconds() / 60
         assert 14 * 60 + 30 + 10 <= mins <= 14 * 60 + 30 + 15
+
+
+# --------------------------------------------------------- price action
+def _bars(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
+    t = pd.date_range("2026-11-10", periods=len(rows), freq="1h")
+    o, h, lo, c = zip(*rows, strict=True)
+    return pd.DataFrame(
+        {"time": t, "open": o, "high": h, "low": lo, "close": c, "tick_volume": 100}
+    )
+
+
+def test_candlestick_patterns() -> None:
+    from src.strategies.candles import engulfing, pin_bar, star
+
+    df = _bars([(10, 10.2, 9.0, 10.1), (10, 11.0, 9.8, 9.9)])
+    bull, bear = pin_bar(df)
+    assert bull.iloc[0] and not bear.iloc[0]  # hammer
+    assert bear.iloc[1] and not bull.iloc[1]  # shooting star
+    df = _bars([(10, 10.1, 9.4, 9.5), (9.4, 10.3, 9.3, 10.2)])
+    assert engulfing(df)[0].iloc[1]
+    df = _bars([(11, 11.1, 9.9, 10.0), (9.95, 10.05, 9.8, 9.9), (9.9, 10.9, 9.85, 10.8)])
+    assert star(df)[0].iloc[2]
+
+
+def test_sr_zones_are_causal_and_find_levels() -> None:
+    from src.backtest.engine import synthetic_m1
+    from src.strategies.sr_levels import sr_zones
+
+    bars = ind.resample_ohlc(synthetic_m1(60_000, seed=9), "H1")
+    atr = ind.atr(bars, 14)
+    full = sr_zones(bars, atr)
+    cut = 600
+    part = sr_zones(bars.iloc[:cut], atr.iloc[:cut])
+    a = full.iloc[: cut - 1][["support", "resistance"]].fillna(-1)
+    b = part.iloc[: cut - 1][["support", "resistance"]].fillna(-1)
+    assert a.equals(b)
+    assert full["support"].notna().mean() > 0.3 and full["resistance"].notna().mean() > 0.3
+    ok = full["support"].notna()
+    assert (full.loc[ok, "support"] < bars.loc[ok, "close"]).all()
+
+
+def test_price_action_explains_every_signal() -> None:
+    from src.backtest.engine import synthetic_m1
+
+    s = load_settings()
+    s.strategy.name = "price_action"
+    s.strategy.timeframes = {"entry": "H1", "confirm": "H1", "trend": "H1"}
+    s.strategy.params = {
+        **LIBRARY["price_action"].DEFAULTS,
+        "min_score": 3.0,
+        "trend_filter": False,
+    }
+    strat = create_strategy(s.strategy, s.levels, UTC)
+    strat.symbol = "XAUUSD"
+    f = strat.compute_features({"H1": ind.resample_ohlc(synthetic_m1(200_000, seed=6), "H1")})
+    sig = f[f["signal"] != 0]
+    assert len(sig) > 0
+    assert (sig["reason_text"].str.len() > 10).all()
+    assert (sig["tp_dist"] / sig["sl_dist"] >= 1.5 - 1e-9).all()  # min_rr respected
+
+
+def test_price_action_study_runs_and_has_baseline(tmp_path) -> None:  # noqa: ANN001
+    from rich.console import Console
+
+    from src.backtest.engine import synthetic_m1
+    from src.lab.study import StudyConfig, run_study, study_frame, summarize
+
+    bars = ind.resample_ohlc(synthetic_m1(150_000, seed=2), "H1")
+    ev = study_frame(bars, 0.01, StudyConfig())
+    assert set(ev["location"]) <= {"S/R", "nessun livello"}
+    assert ev["r"].between(-1.0001, 2.0001).all()
+    assert (ev["pattern"] == "Candela qualsiasi (baseline)").any()
+    assert not summarize(ev, 10).empty
+    s = load_settings()
+    s.general.log_dir = str(tmp_path)
+    con = Console(record=True, width=160)
+    run_study(
+        s, {"XAUUSD": {"H1": (bars, None)}}, con, StudyConfig(timeframes=("H1",), min_events=10)
+    )
+    assert "Textbook rule" in con.export_text()
+    assert (tmp_path / "study" / "price_action_study_H1.csv").exists()

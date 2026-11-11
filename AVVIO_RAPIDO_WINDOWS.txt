@@ -23,6 +23,7 @@ POI, IN ORDINE (doppio clic):
  4_OTTIMIZZA.bat     (facoltativo) cerca parametri migliori e li verifica out-of-sample
  6_LABORATORIO.bat   cerca automaticamente strategie robuste (walk-forward, anti-caso, ML, cassaforte)
  7_LAB_DRYRUN.bat    fa girare insieme in dry-run le strategie promosse dal laboratorio
+ 9_STUDIO_PRICE_ACTION.bat misura quali pattern a candele / supporti / resistenze funzionano davvero
  8_CALENDARIO_NOTIZIE.bat  installa l'export del calendario economico di MT5 (consigliato prima del laboratorio)
  5_DRYRUN_DEMO.bat   (dopo) bot live con esecuzione simulata + dashboard
 

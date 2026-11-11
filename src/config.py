@@ -231,6 +231,7 @@ class LabConfig:
             "orb",
             "vwap_reversion",
             "news_drift",
+            "price_action",
         ]
     )
     history_days: dict[str, int] = field(

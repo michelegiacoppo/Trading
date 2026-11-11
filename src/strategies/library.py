@@ -26,6 +26,8 @@ from src.core.clock import ServerClock
 from src.core.levels import compute_levels
 from src.strategies import indicators as ind
 from src.strategies.base_strategy import BaseStrategy, Signal
+from src.strategies.candles import LABELS_IT, PATTERNS, detect_all
+from src.strategies.sr_levels import market_structure, sr_zones
 
 TREND_EXEC: dict[str, Any] = {
     "tp1_r": 99.0, "tp1_close_fraction": 0.0, "trailing_mode": "atr", "trailing_only_after_tp1": False,
@@ -118,7 +120,8 @@ class SingleTFStrategy(BaseStrategy):
         d = spec.digits
         return Signal(symbol=symbol_cfg.name, side=side, order_type="market", entry=round(entry, d),
                       stop_loss=round(sl, d), take_profit=round(tp, d), atr=atr,
-                      time=pd.Timestamp(row["time"]), reason=f"{self.name} {self.tf}")  # fmt: skip
+                      time=pd.Timestamp(row["time"]),
+                      reason=str(row.get("reason_text") or f"{self.name} {self.tf}"))  # fmt: skip
 
 
 def _first(cond: pd.Series) -> pd.Series:
@@ -275,7 +278,149 @@ class NewsDrift(SingleTFStrategy):
         return pd.Series(long_, index=df.index), pd.Series(short, index=df.index)
 
 
+_ZONE_CACHE: dict[tuple, pd.DataFrame] = {}
+
+
+class PriceAction(SingleTFStrategy):
+    """A rule-based "professional trader": candlestick pattern + location + context + confirmation.
+
+    For every candle it asks the questions a discretionary trader asks:
+
+    1. **Pattern** - is there a reversal (pin bar, engulfing, star, tweezer) or continuation
+       (inside-bar breakout, three soldiers, marubozu) candle?
+    2. **Location** - did the reversal form ON a support / resistance zone built from past
+       swing points (more touches = stronger zone)? Continuation patterns need the trend.
+    3. **Context** - trend (price vs EMA200, EMA50 slope), market structure (HH/HL vs LH/LL),
+       volume expansion.
+    4. **Confirmation** - optionally wait for the next candle to close beyond the pattern.
+    5. **Room** - the target is the next opposite zone; the trade is taken only if the
+       reward/risk to that zone is at least ``min_rr``.
+
+    Each factor adds to a confluence score; a signal needs ``score >= min_score``. The
+    reasoning is written in ``reason_text`` (logged with every trade).
+    """
+
+    name = "price_action"
+    DEFAULTS: ClassVar[dict[str, Any]] = {
+        "min_score": 3.5, "min_rr": 2.0, "confirm": 0, "trend_filter": True, "zone_tol_atr": 0.5,
+        "pivot_k": 3, "zone_lookback": 300, "sl_buffer_atr": 0.2, "max_sl_atr": 3.0, "sl_atr": 0.0,
+    }  # fmt: skip
+    GRID: ClassVar[dict[str, list[Any]]] = {"min_score": [3.0, 4.0], "min_rr": [1.5, 2.5],
+                                            "confirm": [0, 1], "trend_filter": [True, False]}  # fmt: skip
+    TIMEFRAMES: ClassVar[list[str]] = ["M15", "H1", "H4"]
+    EXEC: ClassVar[dict[str, Any]] = {
+        "tp1_r": 99.0, "tp1_close_fraction": 0.0, "trailing_only_after_tp1": True,
+        "max_trade_duration_minutes": 0, "stale_require_fade": False,
+    }  # fmt: skip
+
+    def _zones(self, df: pd.DataFrame) -> pd.DataFrame:
+        k, lb = int(self.p["pivot_k"]), int(self.p["zone_lookback"])
+        key = (
+            self.symbol,
+            self.tf,
+            len(df),
+            str(df["time"].iloc[0]),
+            str(df["time"].iloc[-1]),
+            k,
+            lb,
+        )
+        if key not in _ZONE_CACHE:
+            if len(_ZONE_CACHE) > 64:
+                _ZONE_CACHE.clear()
+            _ZONE_CACHE[key] = sr_zones(df, df["atr"], k=k, lookback=lb)
+        return _ZONE_CACHE[key]
+
+    def signals(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        p = self.p
+        atr = df["atr"]
+        c, h, lo = df["close"], df["high"], df["low"]
+        z = self._zones(df)
+        pats = detect_all(df, atr)
+        ema50, ema200 = ind.ema(c, 50), ind.ema(c, 200)
+        trend_up = (c > ema200) & (ema50 > ema50.shift(5))
+        trend_dn = (c < ema200) & (ema50 < ema50.shift(5))
+        struct = market_structure(df, int(p["pivot_k"]))
+        vol = df["tick_volume"].astype(float)
+        vol_up = vol > 1.3 * vol.rolling(20).mean().shift(1)
+        tol = float(p["zone_tol_atr"]) * atr
+        low3, high3 = lo.rolling(3).min(), h.rolling(3).max()
+        at_sup = (low3 <= z["support"] + tol) & (c > z["support"])
+        at_res = (high3 >= z["resistance"] - tol) & (c < z["resistance"])
+
+        def side_score(bull: bool) -> tuple[pd.Series, pd.Series]:
+            idx = 0 if bull else 1
+            rev_w = pd.Series(0.0, index=df.index)
+            cont_w = pd.Series(0.0, index=df.index)
+            name_s = pd.Series("", index=df.index, dtype=object)
+            for name, (_, _, w, reversal) in PATTERNS.items():
+                flag = pats[name][idx]
+                target = rev_w if reversal else cont_w
+                better = flag & (w > target)
+                target[better] = w
+                name_s[better & (name_s == "")] = LABELS_IT[name][idx]
+            at = at_sup if bull else at_res
+            touches = z["support_touches"] if bull else z["resistance_touches"]
+            trend = trend_up if bull else trend_dn
+            counter = trend_dn if bull else trend_up
+            st = struct == (1 if bull else -1)
+            valid = ((rev_w > 0) & at) | ((cont_w > 0) & trend)
+            score = (np.maximum(rev_w.where(at, 0.0), cont_w.where(trend, 0.0))
+                     + 1.5 * at.astype(float) + (0.5 * (touches - 1).clip(0, 3)).where(at, 0.0)
+                     + trend.astype(float) + st.astype(float) + 0.5 * vol_up.astype(float))  # fmt: skip
+            ok = valid & (score >= float(p["min_score"]))
+            if p["trend_filter"]:
+                ok &= ~counter
+            return ok.fillna(False), score.where(ok)
+
+        bull_ok, bull_sc = side_score(True)
+        bear_ok, bear_sc = side_score(False)
+        if int(p["confirm"]):  # wait for the next candle to close beyond the pattern extreme
+            bull_ok = bull_ok.shift(1, fill_value=False) & (c > h.shift(1))
+            bear_ok = bear_ok.shift(1, fill_value=False) & (c < lo.shift(1))
+            bull_sc, bear_sc = bull_sc.shift(1), bear_sc.shift(1)
+        n_bars = 3 + int(p["confirm"])
+        buf = float(p["sl_buffer_atr"]) * atr
+        sl_long = c - (lo.rolling(n_bars).min() - buf)
+        sl_short = (h.rolling(n_bars).max() + buf) - c
+        tp_long = (z["resistance"] - 0.1 * atr - c).where(z["resistance"].notna(), 2.5 * sl_long)
+        tp_short = (c - z["support"] - 0.1 * atr).where(z["support"].notna(), 2.5 * sl_short)
+        max_sl = float(p["max_sl_atr"]) * atr
+        rr_l, rr_s = tp_long / sl_long, tp_short / sl_short
+        long_ = bull_ok & (sl_long > 0) & (sl_long <= max_sl) & (rr_l >= float(p["min_rr"]))
+        short = bear_ok & (sl_short > 0) & (sl_short <= max_sl) & (rr_s >= float(p["min_rr"]))
+        both = long_ & short
+        long_, short = long_ & ~both, short & ~both
+        df["sl_dist"] = np.where(long_, sl_long, np.where(short, sl_short, np.nan))
+        df["tp_dist"] = np.where(long_, tp_long, np.where(short, tp_short, np.nan))
+        df["reason_text"] = ""
+        for i in np.flatnonzero((long_ | short).to_numpy()):
+            bull = bool(long_.iloc[i])
+            j = i - int(p["confirm"])
+            pat = next((LABELS_IT[nm][0 if bull else 1] for nm in PATTERNS if pats[nm][0 if bull else 1].iloc[j]),
+                       "pattern")  # fmt: skip
+            lvl = z["support"].iloc[i] if bull else z["resistance"].iloc[i]
+            tch = z["support_touches"].iloc[i] if bull else z["resistance_touches"].iloc[i]
+            where = (f"su {'supporto' if bull else 'resistenza'} {lvl:.5g} ({int(tch)} tocchi)"
+                     if np.isfinite(lvl) else "in trend")  # fmt: skip
+            tr = "trend a favore" if (trend_up if bull else trend_dn).iloc[i] else "trend neutro"
+            rr = (rr_l if bull else rr_s).iloc[i]
+            sc = (bull_sc if bull else bear_sc).iloc[i]
+            conf = ", confermato" if int(p["confirm"]) else ""
+            df.loc[df.index[i], "reason_text"] = (
+                f"{pat} {where}, {tr}{conf}, R:R {rr:.1f}, score {sc:.1f}"
+            )
+        return long_, short
+
+
 LIBRARY: dict[str, type[SingleTFStrategy]] = {
     cls.name: cls
-    for cls in (TrendDonchian, EmaCross, TSMomentum, OpeningRangeBreakout, VwapReversion, NewsDrift)
+    for cls in (
+        TrendDonchian,
+        EmaCross,
+        TSMomentum,
+        OpeningRangeBreakout,
+        VwapReversion,
+        NewsDrift,
+        PriceAction,
+    )
 }

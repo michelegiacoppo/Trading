@@ -20,6 +20,7 @@ python main.py --mode backtest --days 365 --profile attivo --symbols XAUUSD EURU
 python main.py --mode download --days 180 [--ticks]
 python main.py --mode lab [--families orb tsmom] [--quick] [--symbols ...]   # strategy research lab
 python main.py --mode dryrun --profiles lab        # run every lab_* profile together (MultiTrader)
+python main.py --mode study [--symbols ...]        # price-action study (patterns x S/R x trend x confirm)
 python main.py --mode diag | dryrun | live --confirm-live   # Windows + MT5 terminal only
 ```
 

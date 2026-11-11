@@ -365,6 +365,37 @@ def expand_profiles(names: list[str] | None) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def run_study(settings: Settings, args: argparse.Namespace) -> int:
+    """Price-action study: candlestick patterns x location x trend x confirmation, measured."""
+    from src.lab.runner import load_lab_data
+    from src.lab.study import StudyConfig, run_study
+
+    cfg = StudyConfig()
+    tfs = list(cfg.timeframes)
+    if args.synthetic:
+        from src.backtest.engine import synthetic_m1
+        from src.strategies.indicators import resample_ohlc
+
+        data = {}
+        for k, sym in enumerate(args.resolved_symbols[:2]):
+            m1 = synthetic_m1(n_bars=args.bars, seed=21 + k)
+            data[sym] = {tf: (resample_ohlc(m1, tf), None) for tf in tfs}
+    else:
+        conn, store, _ = _mt5_store(settings, need_mt5=not args.offline)
+        try:
+            data = load_lab_data(settings, args.resolved_symbols, store, conn, console, tfs)
+        finally:
+            if conn is not None:
+                conn.shutdown()
+    if not data:
+        console.print(
+            "[red]No data: run with MT5 open (or after the lab has downloaded history).[/]"
+        )
+        return 1
+    run_study(settings, data, console, cfg)
+    return 0
+
+
 def run_trading(settings: Settings, args: argparse.Namespace, dry_run: bool) -> int:
     from src.core.mt5_connector import MT5Connector
     from src.core.trader import LiveTrader
@@ -418,7 +449,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="XAU Quant Scalper - MT5 fast-intraday framework")
     p.add_argument(
         "--mode",
-        choices=["live", "dryrun", "backtest", "diag", "download", "lab"],
+        choices=["live", "dryrun", "backtest", "diag", "download", "lab", "study"],
         default="dryrun",
     )
     p.add_argument("--config", default=None, help="path to settings.yaml")
@@ -468,12 +499,14 @@ def main(argv: list[str] | None = None) -> int:
     ui_mode = args.mode in ("live", "dryrun") and not args.no_ui
     setup_logging(settings, args.mode, to_console=not ui_mode)
 
-    if args.mode in ("backtest", "diag", "lab"):
+    if args.mode in ("backtest", "diag", "lab", "study"):
         console.width = max(console.width, 150)  # wide tables (the saved report stays readable)
         try:
             if args.mode == "lab":
                 logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
                 return run_lab(settings, args)
+            if args.mode == "study":
+                return run_study(settings, args)
             if args.mode == "backtest":
                 # simulated kill-switch / gap events are summarised in the report, not per bar
                 logging.getLogger("src.risk").setLevel(logging.CRITICAL + 1)
@@ -493,9 +526,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def save_console_report(settings: Settings, mode: str) -> None:
     """Save the whole console output (plain text) so it can be shared without copy/paste losses."""
-    name = {"backtest": "ultimo_report.txt", "lab": "ultimo_laboratorio.txt"}.get(
-        mode, "ultima_diagnostica.txt"
-    )
+    name = {
+        "backtest": "ultimo_report.txt",
+        "lab": "ultimo_laboratorio.txt",
+        "study": "ultimo_studio_price_action.txt",
+    }.get(mode, "ultima_diagnostica.txt")
     out = PROJECT_ROOT / settings.general.log_dir / name
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(console.export_text(clear=False), encoding="utf-8")

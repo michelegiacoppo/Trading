@@ -360,7 +360,7 @@ levels:
 # Cerca strategie su tutte le famiglie, simboli e timeframe, con filtri anti-caso.
 # -----------------------------------------------------------------------------
 lab:
-  families: [trend_donchian, ema_cross, tsmom, orb, vwap_reversion, news_drift]  # news_drift richiede il calendario
+  families: [trend_donchian, ema_cross, tsmom, orb, vwap_reversion, news_drift, price_action]  # news_drift richiede il calendario
   history_days: {M5: 365, M15: 730, H1: 2190, H4: 3650}   # storico scaricato per timeframe
   holdout_months: 3              # CASSAFORTE: ultimi 3 mesi mai usati per scegliere, solo verifica finale
   wf_test_months: 3              # walk-forward: finestre di verifica da 3 mesi...
